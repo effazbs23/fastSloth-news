@@ -9,13 +9,32 @@ Facebook/Instagram/X, and logs telemetry a Next.js dashboard reads.
 - **Trigger**: GitHub Actions cron, `17 * * * *` (hourly, off the top of the
   hour to dodge GitHub's queue spikes). `.github/workflows/pipeline.yml`.
 - **Pipeline**: `main_pipeline.py` — fetch provider pages → dedupe against
-  `news_items.url` → fetch full article text → Gemini 1.5 Flash structured
+  `news_items.url` → fetch full article text → Gemini structured
   extraction → Playwright renders 4 PNG cards (1080x1080) → publish to
   Meta/X → insert row → always write one `cron_logs` row per run.
 - **DB**: Postgres (Supabase/Neon), pooled connection on port 6543,
   `sslmode=require`. Schema in `schema.sql`. Run it once against the DB.
 - **Dashboard**: Next.js App Router on Vercel. `app/api/telemetry/route.js`
   queries `cron_logs` + `news_items`; `app/page.js` renders it.
+
+## Incidents
+
+- **2026-09-01 — zero stories extracted, both providers.** Root causes:
+  1. `google-generativeai` (sunset 2025-08-31) + `gemini-1.5-flash` (fully
+     shut down 2025-09-24, 404s on every call) — every extraction silently
+     failed inside the per-provider `try/except`, so nothing ever reached the
+     DB even though the workflow exited green. Migrated to the `google-genai`
+     SDK (`from google import genai`, `genai.Client(...).models.generate_content(...)`)
+     on `gemini-3.5-flash`. **`gemini-2.5-flash` is scheduled to shut down
+     2026-10-16** (and has been intermittently 404ing even earlier) — if
+     `gemini-3.5-flash` itself starts erroring, bump `GEMINI_MODEL` in
+     `main_pipeline.py` to whatever Google's current stable Flash model is.
+  2. Daily Star's article links are *relative* (`/sports/football/news/<slug>-<id>`),
+     but the old filter only matched absolute URLs containing `/news/` right
+     after the domain — 0 candidates, always. Fixed by resolving every href
+     with `urljoin()` and matching on a numeric article-id path segment
+     instead (also tightened on Star News BD to stop matching `/tag/...`
+     pages as if they were articles).
 
 ## Known ceilings (deliberate, not oversights)
 
@@ -74,7 +93,7 @@ the Actions tab (`workflow_dispatch` is enabled).
 ## Files
 
 - `main_pipeline.py` — the pipeline
-- `requirements.txt` — requests, beautifulsoup4, google-generativeai, psycopg2-binary, playwright
+- `requirements.txt` — requests, beautifulsoup4, google-genai, psycopg2-binary, playwright
 - `schema.sql` — the two tables
 - `.github/workflows/pipeline.yml` — cron + secrets wiring
 - `app/api/telemetry/route.js`, `app/page.js`, `app/layout.js` — dashboard

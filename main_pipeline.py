@@ -15,14 +15,16 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import time
 import urllib.parse
 import uuid
+from urllib.parse import urljoin
 
 import psycopg2
 import requests
 from bs4 import BeautifulSoup
-import google.generativeai as genai
+from google import genai
 from playwright.sync_api import sync_playwright
 
 # DATABASE_URL must use the pooled connection (port 6543) with sslmode=require,
@@ -30,7 +32,9 @@ from playwright.sync_api import sync_playwright
 # Percent-encode special characters in the password (`[`->%5B, `]`->%5D, `@`->%40,
 # `#`->%23, `/`->%2F) or psycopg2 will fail to parse the URL / DNS-resolve the host.
 DB_URL = os.environ["DATABASE_URL"]
-genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+gemini_client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+# gemini-2.5-flash shuts down 2026-10-16; bump this if that's already passed.
+GEMINI_MODEL = "gemini-3.5-flash"
 
 # Optional - social publishing is skipped per-platform when its secrets are absent.
 META_ACCESS_TOKEN = os.environ.get("META_ACCESS_TOKEN")
@@ -48,17 +52,22 @@ GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 GITHUB_REF_NAME = os.environ.get("GITHUB_REF_NAME", "main")
 
+# is_article matches on the resolved absolute URL. Both sites list plenty of
+# nav/category/tag links alongside real stories; a numeric article-id segment
+# in the path is what reliably tells them apart.
 NEWS_CHANNELS = [
     {
         "name": "Star News BD",
         "url": "https://starnews.com.bd/",
-        "link_filter": lambda href: href.startswith("http") and "starnews.com.bd" in href
+        "is_article": re.compile(r"starnews\.com\.bd/[a-z-]+/\d{3,}/").search,
     },
     {
         "name": "The Daily Star",
         "url": "https://www.thedailystar.net/todays-news",
-        "link_filter": lambda href: href.startswith("http") and "thedailystar.net/news/" in href
-    }
+        # Daily Star article links are relative (resolved via urljoin below)
+        # and don't live directly under /news/, e.g. /sports/football/news/<slug>-<id>
+        "is_article": re.compile(r"thedailystar\.net/.+-\d{5,}$").search,
+    },
 ]
 
 
@@ -96,8 +105,11 @@ def parse_story_with_ai(title, text):
     Article Title: {title}
     Article Text: {text[:2000]}
     """
-    model = genai.GenerativeModel('gemini-1.5-flash')
-    res = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+    res = gemini_client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=prompt,
+        config={"response_mime_type": "application/json"},
+    )
     return json.loads(res.text)
 
 
@@ -292,8 +304,8 @@ def run():
             soup = BeautifulSoup(res.text, "html.parser")
 
             for a in soup.find_all("a", href=True):
-                href, title = a['href'], a.get_text(strip=True)
-                if channel["link_filter"](href) and len(title) > 20:
+                href, title = urljoin(channel["url"], a['href']), a.get_text(strip=True)
+                if channel["is_article"](href) and len(title) > 20:
                     if not is_processed(href):
                         print(f"Processing new link from {channel['name']}: {title}")
 
