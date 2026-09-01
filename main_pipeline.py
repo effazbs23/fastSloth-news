@@ -21,6 +21,7 @@ import re
 import time
 import urllib.parse
 import uuid
+from datetime import datetime
 from urllib.parse import urljoin
 
 import psycopg2
@@ -49,11 +50,19 @@ X_CONSUMER_SECRET = os.environ.get("X_CONSUMER_SECRET")
 X_ACCESS_TOKEN = os.environ.get("X_ACCESS_TOKEN")
 X_ACCESS_SECRET = os.environ.get("X_ACCESS_SECRET")
 
-# GitHub-Actions-provided - used to host generated card PNGs at a public raw URL,
-# since Instagram's Graph API only accepts a fetchable image_url, not raw bytes.
-GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY")
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
-GITHUB_REF_NAME = os.environ.get("GITHUB_REF_NAME", "main")
+# Supabase Storage - archives every generated card, and (once configured)
+# gives Instagram's Graph API the public image_url it needs to fetch a photo.
+SUPABASE_URL = os.environ.get("SUPABASE_URL")  # e.g. https://xxxxx.supabase.co
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+SUPABASE_STORAGE_BUCKET = os.environ.get("SUPABASE_STORAGE_BUCKET", "photocards")
+
+# --- Brand template tokens, sampled from assets/logo.png (fastSloth News) ---
+BRAND_LOGO_PATH = "assets/logo.png"  # falls back to a text label if this file is missing
+BRAND_BG_COLOR = "#ffffff"       # logo's background - keeps the logo's corner seamless
+BRAND_ACCENT_COLOR = "#f03018"   # red-orange from the sloth icon's gradient
+BRAND_TEXT_COLOR = "#101018"     # near-black, matches the "fast"/"news" wordmark
+BRAND_MUTED_COLOR = "#6b7280"    # neutral gray for secondary text (not in the logo itself)
+BRAND_FONT_FAMILY = "sans-serif"  # swap for a Google Fonts name once one is picked
 
 # is_article matches on the resolved absolute URL. Both sites list plenty of
 # nav/category/tag links alongside real stories; a numeric article-id segment
@@ -179,14 +188,37 @@ def parse_story_with_ai(title, text):
     return {k: (", ".join(map(str, v)) if isinstance(v, list) else str(v)) for k, v in data.items()}
 
 
+def _brand_logo_data_uri():
+    """Base64-embeds the logo so Playwright renders it with no file:// path issues."""
+    if not os.path.exists(BRAND_LOGO_PATH):
+        return None
+    with open(BRAND_LOGO_PATH, "rb") as f:
+        encoded = base64.b64encode(f.read()).decode()
+    ext = os.path.splitext(BRAND_LOGO_PATH)[1].lstrip(".") or "png"
+    return f"data:image/{ext};base64,{encoded}"
+
+
 def render_image_cards(data, source_name):
-    """Converts story data into 3-5 visual cards using HTML template rendering"""
+    """Converts story data into 3-5 visual cards using HTML template rendering.
+
+    Every card shares the same frame - brand logo, date, and a location badge -
+    around whichever field that slide highlights.
+    """
     cards = [
         {"title": "LOCATION", "content": data.get("location", "N/A")},
         {"title": "CONTEXT", "content": data.get("context", "N/A")},
         {"title": "KEY ENTITIES", "content": data.get("accused_victim", "N/A")},
         {"title": "ISSUES", "content": data.get("issues", "N/A")}
     ]
+
+    logo_uri = _brand_logo_data_uri()
+    logo_html = (
+        f'<img src="{logo_uri}" style="height:56px;">'
+        if logo_uri
+        else f'<div style="font-weight:bold; font-size:22px; color:{BRAND_ACCENT_COLOR};">{source_name.upper()}</div>'
+    )
+    date_str = datetime.now().strftime("%d %b %Y")
+    location = data.get("location") or "N/A"
 
     story_id = uuid.uuid4().hex[:8]
     generated_files = []
@@ -197,10 +229,18 @@ def render_image_cards(data, source_name):
         for idx, card in enumerate(cards):
             html_content = f"""
             <html>
-            <body style="background:#0f172a; color:#fff; font-family:sans-serif; display:flex; flex-direction:column; justify-content:center; align-items:center; height:100vh; margin:0; padding:40px; box-sizing:border-box;">
-                <div style="position:absolute; top:40px; left:40px; font-weight:bold; color:#38bdf8;">{source_name.upper()}</div>
-                <h2 style="color:#94a3b8; letter-spacing:2px; font-size:24px;">{card['title']}</h2>
-                <p style="font-size:36px; text-align:center; line-height:1.4; font-weight:600;">{card['content']}</p>
+            <body style="margin:0; padding:0; width:1080px; height:1080px; background:{BRAND_BG_COLOR}; color:{BRAND_TEXT_COLOR}; font-family:{BRAND_FONT_FAMILY}; box-sizing:border-box;">
+                <div style="display:flex; flex-direction:column; width:100%; height:100%; padding:40px; box-sizing:border-box;">
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        {logo_html}
+                        <div style="font-size:16px; color:{BRAND_MUTED_COLOR};">{date_str}</div>
+                    </div>
+                    <div style="flex:1; display:flex; flex-direction:column; justify-content:center; align-items:center; text-align:center;">
+                        <h2 style="color:{BRAND_MUTED_COLOR}; letter-spacing:2px; font-size:24px;">{card['title']}</h2>
+                        <p style="font-size:36px; line-height:1.4; font-weight:600; max-width:900px;">{card['content']}</p>
+                    </div>
+                    <div style="font-size:16px; color:{BRAND_ACCENT_COLOR};">📍 {location} &nbsp;&middot;&nbsp; {source_name}</div>
+                </div>
             </body>
             </html>
             """
@@ -212,32 +252,47 @@ def render_image_cards(data, source_name):
     return generated_files
 
 
-# ponytail: images are committed straight into the repo for a free public URL.
-# Fine at low volume; if story throughput grows, swap for a Supabase Storage
-# bucket (also free tier) so the git history doesn't grow unbounded.
-def upload_image_public(local_path):
-    """Commit a card PNG into the repo so Instagram's Graph API can fetch it by URL."""
+def upload_to_storage(local_path):
+    """Upload a card PNG to the Supabase Storage bucket and return its public URL."""
+    dest_path = os.path.basename(local_path)
     with open(local_path, "rb") as f:
-        content_b64 = base64.b64encode(f.read()).decode()
-    dest_path = f"public/cards/{os.path.basename(local_path)}"
-    api_url = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/contents/{dest_path}"
-    resp = requests.put(
-        api_url,
-        headers={"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"},
-        json={"message": f"cards: add {os.path.basename(local_path)}", "content": content_b64, "branch": GITHUB_REF_NAME},
+        file_bytes = f.read()
+    resp = requests.post(
+        f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_STORAGE_BUCKET}/{dest_path}",
+        headers={
+            "apikey": SUPABASE_SERVICE_ROLE_KEY,
+            "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+            "Content-Type": "image/png",
+        },
+        data=file_bytes,
         timeout=15,
     )
     resp.raise_for_status()
-    return f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/{GITHUB_REF_NAME}/{dest_path}"
+    return f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_STORAGE_BUCKET}/{dest_path}"
 
 
-def publish_to_meta(images, caption):
+def archive_cards_to_storage(images):
+    """Upload every generated card for archival. Returns the public URLs (empty list if not configured)."""
+    if not (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY):
+        print("Storage upload skipped: SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not set.")
+        return []
+    urls = []
+    for img in images:
+        try:
+            urls.append(upload_to_storage(img))
+        except requests.HTTPError as e:
+            print(f"Storage upload failed for {img}: {e.response.text if e.response is not None else e}")
+    return urls
+
+
+def publish_to_meta(public_urls, caption):
     """Post the card carousel to the Facebook Page and Instagram business account."""
     if not (META_ACCESS_TOKEN and META_PAGE_ID):
         print("Meta publishing skipped: META_ACCESS_TOKEN / META_PAGE_ID not set.")
         return
-
-    public_urls = [upload_image_public(img) for img in images]
+    if not public_urls:
+        print("Meta publishing skipped: no public image URLs (Supabase Storage not configured or upload failed).")
+        return
 
     # Facebook Page: upload each photo unpublished, then attach all to one feed post.
     photo_ids = []
@@ -289,7 +344,7 @@ def publish_to_meta(images, caption):
             timeout=15,
         ).raise_for_status()
 
-    print(f"Published {len(images)} slides to Facebook{' and Instagram' if META_IG_USER_ID else ''}.")
+    print(f"Published {len(public_urls)} slides to Facebook{' and Instagram' if META_IG_USER_ID else ''}.")
 
 
 def _oauth1_header(method, url, params, extra_signing_params=None):
@@ -347,10 +402,10 @@ def publish_to_x(images, caption):
     print("Published card 1 + summary to X.")
 
 
-def publish_to_socials(images, data, source):
+def publish_to_socials(images, public_urls, data, source):
     caption = f"[{source}] {data.get('context')}\n\n#News #Updates"
     try:
-        publish_to_meta(images, caption)
+        publish_to_meta(public_urls, caption)
     except requests.HTTPError as e:
         print(f"Meta publish failed: {e.response.text if e.response is not None else e}")
     try:
@@ -403,9 +458,12 @@ def run():
                     # Image Generation (3-5 slides)
                     cards = render_image_cards(data, channel['name'])
 
+                    # Archive every card to storage, regardless of the social-posting cap below
+                    public_urls = archive_cards_to_storage(cards)
+
                     # Social Publishing (capped per run, see MAX_SOCIAL_POSTS_PER_RUN)
                     if social_posts_made < MAX_SOCIAL_POSTS_PER_RUN:
-                        publish_to_socials(cards, data, channel['name'])
+                        publish_to_socials(cards, public_urls, data, channel['name'])
                         social_posts_made += 1
 
                     # DB Logging

@@ -28,12 +28,16 @@ reads.
   a run id → for each provider, scan the whole homepage listing (not just the
   first link) for unprocessed article URLs, up to `MAX_STORIES_PER_PROVIDER`
   → fetch article text → Groq structured extraction → Playwright renders 4
-  PNG cards (1080x1080) → publish to Meta/X for up to `MAX_SOCIAL_POSTS_PER_RUN`
-  stories → insert each story tagged with the run's `cron_log_id` → update
-  the `cron_logs` row with final status/counts. Runs once daily, so scanning
-  the full listing (not stopping at the first match) is what covers "the last
-  24 hours" — no per-article publish-date parsing needed since dedup on
-  `news_items.url` handles re-runs.
+  branded PNG cards (1080x1080, logo/date/location on every card - see
+  Brand template below) → archive every card to Supabase Storage → publish to
+  Meta/X for up to `MAX_SOCIAL_POSTS_PER_RUN` stories → insert each story
+  tagged with the run's `cron_log_id` → update the `cron_logs` row with final
+  status/counts. Runs once daily, so scanning the full listing (not stopping
+  at the first match) is what covers "the last 24 hours" — no per-article
+  publish-date parsing needed since dedup on `news_items.url` handles re-runs.
+  Processing is inherently serial (one story fully finishes - extract, render,
+  archive, publish, insert - before the next starts), which is what "queued"
+  photocard generation meant in practice; no separate queue infra was added.
 - **DB**: Postgres (Supabase/Neon), pooled connection on port 6543,
   `sslmode=require`. Schema in `schema.sql`, safe to re-run (uses
   `IF NOT EXISTS`/idempotent `ALTER`) — re-run it against your existing DB
@@ -50,6 +54,41 @@ reads.
     `latestBatch`, so it always reflects exactly one run's output). The
     **Refresh** button calls `/api/refresh`, then polls `/api/telemetry`
     every 5s (up to 3 min) until a new completed run shows up.
+
+## Brand template
+
+`render_image_cards()` in `main_pipeline.py` draws every card from one shared
+frame - brand logo top-left, date top-right, a `📍 location · source` badge
+along the bottom - around whichever field (location/context/entities/issues)
+that particular slide highlights. Tokens to swap for the real brand kit, all
+at the top of `main_pipeline.py`:
+
+- `BRAND_LOGO_PATH` = `assets/logo.png` (the real fastSloth News logo, resized
+  from the 1536x1024/1MB original down to 600x400/139KB - it only ever
+  renders at 56px tall, no reason to base64-embed the full-res file into
+  every card). Falls back to a plain text source-name label if the file is
+  ever missing, so a bad path never breaks a run.
+- `BRAND_BG_COLOR` (`#ffffff`), `BRAND_ACCENT_COLOR` (`#f03018`),
+  `BRAND_TEXT_COLOR` (`#101018`) are sampled straight from `assets/logo.png`
+  (clustered the most common non-background pixel colors - see git history
+  for the exact method) - not eyeballed. `BRAND_MUTED_COLOR` (`#6b7280`) is
+  a plain neutral gray, since the logo itself has no gray in it. White
+  background was a deliberate choice, not a default: the logo has a white
+  background too, so the corner sits flush instead of showing a mismatched
+  box. Verified by actually rendering a card locally (Playwright + a scratch
+  venv) and viewing the PNG before shipping, not just reasoning about the CSS.
+- `BRAND_FONT_FAMILY` - currently generic `sans-serif`; swap for a Google
+  Fonts name (Chromium can load it directly at render time, no font file to
+  manage) or add a `@font-face` pointing at a local file for a licensed font.
+- Card size is 1080x1080 (`viewport` in `render_image_cards()`) - change if a
+  different aspect ratio is needed (e.g. 1080x1350 portrait, 1080x1920 Story).
+
+I evaluated `saurav-z/free-image-generation-api` (a Cloudflare Workers /
+Stable Diffusion XL text-to-image API) for this and deliberately did not use
+it: it has no way to guarantee exact logo placement, exact brand colors, or
+legible text in the output - especially not the Bengali headlines this
+pipeline actually extracts. HTML/CSS→PNG via Playwright is deterministic and
+was already in place, so it's what got extended instead.
 
 ## Incidents
 
@@ -126,14 +165,22 @@ reads.
   `news_items` columns are `TEXT` and psycopg2 would otherwise adapt a
   Python list into a Postgres array literal instead of erroring loudly.
 
-## Known ceilings (deliberate, not oversights)
+- **2026-09-01 — added a branded template (logo/date/location) and moved
+  image storage off the GitHub-commit workaround.** User didn't have access
+  to Google Cloud Console (needed for any Drive service account), so instead
+  of Drive: reused the *existing* Supabase project (already the DB) and
+  enabled Storage on it - no new signup, no console, one `service_role` key.
+  `upload_image_public()` (the GitHub Contents API commit hack) is gone;
+  `upload_to_storage()`/`archive_cards_to_storage()` upload every card to a
+  Supabase Storage bucket instead, unconditionally (not gated by the social
+  post cap, since archiving and social publishing are separate concerns now).
+  Instagram's Graph API `image_url` now points at the Supabase public URL
+  instead of `raw.githubusercontent.com`. This also resolves the "image
+  hosting" ceiling below - the git repo no longer grows with every story.
+  `permissions: contents: write` and `GITHUB_TOKEN` dropped from the workflow
+  since nothing writes to the repo from the pipeline anymore.
 
-- **Image hosting**: Instagram's Graph API needs a public `image_url`, not
-  raw bytes, so generated cards get committed into `public/cards/` via the
-  GitHub Contents API (`GITHUB_TOKEN`, auto-provided in Actions) and served
-  from `raw.githubusercontent.com`. Free and simple, but the repo grows
-  ~1-2 images per new story forever. If story volume grows, swap this for a
-  Supabase Storage bucket (also free tier) instead of committing to git.
+## Known ceilings (deliberate, not oversights)
 - **X auth**: no `tweepy`/`requests-oauthlib` — OAuth 1.0a is hand-signed
   with stdlib `hmac`/`hashlib` in `_oauth1_header()` to keep
   `requirements.txt` to exactly the libraries specified. Needs *user-context*
@@ -169,15 +216,20 @@ Settings → Secrets and variables → Actions → New repository secret:
 |---|---|---|
 | `DATABASE_URL` | yes | pooled, `sslmode=require` |
 | `GROQ_API_KEY` | yes | console.groq.com, free tier |
+| `SUPABASE_URL` | for storage/IG | e.g. `https://xxxxx.supabase.co` — same project as `DATABASE_URL` |
+| `SUPABASE_SERVICE_ROLE_KEY` | for storage/IG | Settings → API in the Supabase dashboard |
+| `SUPABASE_STORAGE_BUCKET` | optional | defaults to `photocards` — create a **public** bucket with this name in Storage |
 | `META_ACCESS_TOKEN` | optional | long-lived Page token |
 | `META_PAGE_ID` | optional | Facebook Page id |
 | `META_IG_USER_ID` | optional | linked IG business account id |
 | `X_CONSUMER_KEY` / `X_CONSUMER_SECRET` | optional | X app keys |
 | `X_ACCESS_TOKEN` / `X_ACCESS_SECRET` | optional | user-context token, read+write |
 
-`GITHUB_TOKEN` is injected automatically by Actions — nothing to add, but the
-workflow needs `permissions: contents: write` (already set) so it can commit
-card images.
+Without `SUPABASE_URL`/`SUPABASE_SERVICE_ROLE_KEY` the pipeline still runs
+fine (extraction, dashboard, X posting are unaffected) — it just skips
+archiving cards, and skips Meta publishing entirely (both Facebook and
+Instagram need a public `image_url` from Storage now that the GitHub-commit
+workaround is gone).
 
 Workflow runs on the daily cron automatically, or trigger it manually from
 the Actions tab (`workflow_dispatch` is enabled) — or from the dashboard's
@@ -201,6 +253,7 @@ Refresh button, see below.
 ## Files
 
 - `main_pipeline.py` — the pipeline
+- `assets/logo.png` — brand logo (fastSloth News, resized to 600x400)
 - `requirements.txt` — requests, beautifulsoup4, psycopg2-binary, playwright
 - `schema.sql` — the two tables, plus `news_items.cron_log_id`
 - `.github/workflows/pipeline.yml` — cron + secrets wiring
