@@ -1,3 +1,13 @@
+import socket
+
+# Force IPv4 socket resolution globally for GitHub Actions compatibility
+orig_getaddrinfo = socket.getaddrinfo
+def getaddrinfo_ipv4(*args, **kwargs):
+    kwargs['family'] = socket.AF_INET
+    return orig_getaddrinfo(*args, **kwargs)
+
+socket.getaddrinfo = getaddrinfo_ipv4
+
 import os
 import json
 import psycopg2
@@ -5,6 +15,7 @@ import requests
 from bs4 import BeautifulSoup
 import google.generativeai as genai
 from playwright.sync_api import sync_playwright
+
 
 DB_URL = os.environ["DATABASE_URL"]
 genai.configure(api_key=os.environ["GEMINI_API_KEY"])
