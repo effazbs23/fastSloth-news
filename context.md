@@ -10,9 +10,15 @@ reads.
 - **Trigger**: GitHub Actions cron, `17 3 * * *` (once daily at 03:17 UTC),
   plus `workflow_dispatch` — fired both manually from the Actions tab and by
   the dashboard's **Refresh** button. `.github/workflows/pipeline.yml`.
-- **Providers**: Star News BD, The Daily Star, Ittefaq, bdnews24 (via its
-  Bangla subdomain, see below), Daily Campus (`NEWS_CHANNELS` in
-  `main_pipeline.py`). Excluded, deliberately:
+- **Providers**: The Daily Star, Ittefaq (English edition,
+  `en.ittefaq.com.bd`) — `NEWS_CHANNELS` in `main_pipeline.py`.
+  English-only as of 2026-09-01 (was Star News BD/bdnews24/Daily Campus too,
+  all Bangla). Excluded, deliberately:
+  - **Star News BD, Daily Campus** — Bangla-only, no English edition exists.
+  - **bdnews24** — does have an English edition (`bdnews24.com`), but that
+    domain is Cloudflare-blocked; only their Bangla subdomain
+    (`bangla.bdnews24.com`) is actually reachable by a plain `requests`
+    scraper, so it doesn't qualify as an *accessible* English source.
   - **Jamuna TV, Kalerkantho** — sit behind Cloudflare (JS challenge or WAF
     block on every path tried, including `/feed`/`/sitemap.xml`) that a plain
     `requests` scraper can't pass; would need a real challenge-solving
@@ -21,9 +27,6 @@ reads.
     directory to *other* outlets' homepages (Kalerkantho, Bangladesh
     Protidin, ...) and static reference pages (bank lists, flight
     schedules), not original articles. Nothing there to extract.
-  - **bdnews24's main domain** (`bdnews24.com`) is also Cloudflare-blocked,
-    but its Bangla edition (`bangla.bdnews24.com`) isn't and carries the same
-    stories, so that subdomain is what's actually fetched.
 - **Pipeline**: `main_pipeline.py` — insert a `RUNNING` `cron_logs` row to get
   a run id → for each provider, scan the whole homepage listing (not just the
   first link) for unprocessed article URLs, up to `MAX_STORIES_PER_PROVIDER`
@@ -59,54 +62,57 @@ reads.
 
 `render_image_cards()` in `main_pipeline.py` renders **one** card per story
 (not a 4-slide carousel - that was the original design, changed
-2026-09-01): a logo badge top-left, the news (`context`) centered in bold
-type over a subtle gradient tint, a small red accent rule above the
-headline, and a `📍 location` pill in the bottom-left corner. No date, no
-source/vendor attribution anywhere on the card or in the social caption -
-removed deliberately, not an oversight.
+2026-09-01): logo top-left, date top-right, the news (`context`) centered in
+bold type over a subtle gradient tint with a low-opacity stock-photo
+backdrop, a small red accent rule above the headline, and a `📍 location`
+pill in the bottom-left corner. No source/vendor attribution anywhere on the
+card or in the social caption - removed deliberately, not an oversight.
 
-- `BRAND_LOGO_PATH` = `assets/logo.png` (the real fastSloth News logo, resized
-  from the 1536x1024/1MB original to 600x400/139KB - it renders at 110px
-  tall, no reason to base64-embed the full-res file into every card). Sits
-  inside its own white rounded "badge" with a soft shadow rather than placed
-  directly on the gradient background: the logo's PNG has a white
-  background itself, and `mix-blend-mode: multiply` (the usual fix for
-  this) turned out not to reach through the content wrapper's `z-index`
-  stacking context, so it stayed a visibly mismatched box until wrapped in
-  a deliberate badge instead - simpler and confirmed working, where the
-  blend-mode approach was confirmed *not* working, both by actually
-  rendering and looking at the PNG rather than reasoning about the CSS.
-  Falls back to a plain text label if the logo file is ever missing.
+- `BRAND_LOGO_PATH` = `assets/logo.png` (the real fastSloth News logo,
+  resized from the 1536x1024/1MB original to 600x400, then had its white
+  background actually removed (`PIL`, smooth alpha ramp between luminance
+  235–250 to avoid a hard/jagged edge) so it sits directly on any
+  background - no wrapper needed. First attempt kept the original white-bg
+  PNG and tried `mix-blend-mode: multiply` to fake transparency, confirmed
+  *not* working (still a visible box - the content wrapper's `z-index`
+  stacking context blocked the blend from reaching the background layers);
+  second attempt wrapped it in a white "badge" card instead, which worked
+  but wasn't what was asked for; actually removing the background from the
+  source file is what's shipped now. Falls back to a plain text label if
+  the logo file is ever missing. Verified by compositing the processed PNG
+  over a solid color and looking for white fringing before shipping.
 - `BRAND_BG_COLOR` (`#ffffff`), `BRAND_ACCENT_COLOR` (`#f03018`),
   `BRAND_TEXT_COLOR` (`#101018`) are sampled straight from `assets/logo.png`
   (clustered the most common non-background pixel colors), not eyeballed.
+  `BRAND_MUTED_COLOR` (`#6b7280`) is a plain neutral gray for the date.
 - `BRAND_FONT_FAMILY` = `'Inter','Hind Siliguri',sans-serif`, loaded from
   Google Fonts at render time. Inter for crisp modern Latin type; Hind
-  Siliguri so Bengali headlines (most of what this pipeline actually
-  extracts) render as real glyphs instead of tofu boxes or a generic
-  fallback - Chromium picks whichever font in the stack has each character.
-  Confirmed by rendering a card with real Bengali `context` text, not
-  assumed.
+  Siliguri so Bengali headlines render as real glyphs instead of tofu boxes
+  - Chromium picks whichever font in the stack has each character. Confirmed
+  by rendering a card with real Bengali `context` text, not assumed.
 - Card size is 1080x1080 (`viewport` in `render_image_cards()`) - change if a
   different aspect ratio is needed (e.g. 1080x1350 portrait, 1080x1920 Story).
-- **Background art**: `generate_background_image()` optionally calls a
-  deployed `saurav-z/free-image-generation-api` Cloudflare Worker (or
-  anything with the same `{"prompt": ...} -> image bytes` shape) for a
-  low-opacity (0.16) backdrop image behind the text, built from a prompt
-  derived from `context`. This is the one place that AI image generator
-  actually fits: since it only ever sits at low opacity behind the precise
-  HTML/CSS text layer, its imprecision on exact colors/logo/text doesn't
-  matter here the way it would for the rest of the card (see Incidents).
-  Needs `IMAGE_GEN_API_URL` (the deployed Worker's URL) and
-  `IMAGE_GEN_API_KEY` - without them, cards just render on the plain brand
-  background, no error.
+- **Background art**: `fetch_background_image()` optionally pulls a real
+  stock photo from Pexels (`api.pexels.com/v1/search`, free, 200 req/hr,
+  20,000/mo, commercial use OK) at low opacity (0.16) behind the text,
+  queried by the story's `issues` (falling back to `location`). This is the
+  one place external imagery fits at all: it only ever sits at low opacity
+  behind the precise HTML/CSS text layer, so an imperfect topical match
+  doesn't matter the way exact logo/text/color fidelity would for the rest
+  of the card. Needs `PEXELS_API_KEY` - without it, cards just render on
+  the plain gradient background, no error.
 
-I evaluated `saurav-z/free-image-generation-api` (a Cloudflare Workers /
-Stable Diffusion XL text-to-image API) for this and deliberately did not use
-it: it has no way to guarantee exact logo placement, exact brand colors, or
-legible text in the output - especially not the Bengali headlines this
-pipeline actually extracts. HTML/CSS→PNG via Playwright is deterministic and
-was already in place, so it's what got extended instead.
+Earlier iterations of this backdrop used `saurav-z/free-image-generation-api`
+(AI-generated art) and, before that, nothing was used at all - deliberately,
+since an AI image model can't guarantee exact logo placement, exact colors,
+or legible (especially Bengali) text, which matters for the rest of the
+card. Real stock photography sidesteps that concern differently: it's not
+generated at all, just a topically-relevant photo behind low-opacity text.
+Pinterest and Freepik (raised as examples) were not used: neither has a
+public API for this kind of arbitrary keyword image-fetching, and reusing
+Pinterest content specifically is a real copyright/ToS problem since Pinterest
+mostly doesn't own the images pinned on it. Pexels does have a legitimate
+free API with an open commercial-use license, so that's what's wired up.
 
 ## Incidents
 
@@ -248,8 +254,7 @@ Settings → Secrets and variables → Actions → New repository secret:
 | `SUPABASE_URL` | for storage/IG | e.g. `https://xxxxx.supabase.co` — same project as `DATABASE_URL` |
 | `SUPABASE_SERVICE_ROLE_KEY` | for storage/IG | Settings → API in the Supabase dashboard |
 | `SUPABASE_STORAGE_BUCKET` | optional | defaults to `photocards` — create a **public** bucket with this name in Storage |
-| `IMAGE_GEN_API_URL` | optional | a deployed `saurav-z/free-image-generation-api` Worker URL, for the low-opacity card backdrop |
-| `IMAGE_GEN_API_KEY` | optional | that Worker's `API_KEY` |
+| `PEXELS_API_KEY` | optional | free at pexels.com/api, for the low-opacity card backdrop |
 | `META_ACCESS_TOKEN` | optional | long-lived Page token |
 | `META_PAGE_ID` | optional | Facebook Page id |
 | `META_IG_USER_ID` | optional | linked IG business account id |

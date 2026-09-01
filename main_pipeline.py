@@ -21,6 +21,7 @@ import re
 import time
 import urllib.parse
 import uuid
+from datetime import datetime
 from urllib.parse import urljoin
 
 import psycopg2
@@ -55,66 +56,52 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")  # e.g. https://xxxxx.supabase.co
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
 SUPABASE_STORAGE_BUCKET = os.environ.get("SUPABASE_STORAGE_BUCKET", "photocards")
 
-# Optional low-opacity card backdrop - a deployed saurav-z/free-image-generation-api
-# Cloudflare Worker (or any API with the same {"prompt": ...} -> image bytes shape).
+# Optional low-opacity card backdrop - real stock photography from Pexels
+# (free, 200 req/hr, commercial use OK - api.pexels.com), not AI-generated.
 # Cards render fine without it, just on the plain brand background.
-IMAGE_GEN_API_URL = os.environ.get("IMAGE_GEN_API_URL")
-IMAGE_GEN_API_KEY = os.environ.get("IMAGE_GEN_API_KEY")
+PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY")
 
 # --- Brand template tokens, sampled from assets/logo.png (fastSloth News) ---
-BRAND_LOGO_PATH = "assets/logo.png"  # falls back to a text label if this file is missing
-BRAND_BG_COLOR = "#ffffff"       # logo's background - keeps the logo's corner seamless
+BRAND_LOGO_PATH = "assets/logo.png"  # falls back to a text label if this file is missing; background removed (transparent)
+BRAND_BG_COLOR = "#ffffff"
 BRAND_ACCENT_COLOR = "#f03018"   # red-orange from the sloth icon's gradient
 BRAND_TEXT_COLOR = "#101018"     # near-black, matches the "fast"/"news" wordmark
+BRAND_MUTED_COLOR = "#6b7280"    # neutral gray for the date - not in the logo itself
 # Inter for crisp modern Latin type, Hind Siliguri so Bengali headlines render
 # correctly instead of falling back to a generic/missing glyph font - Chromium
 # picks whichever font in the stack actually has each character's glyph.
 BRAND_FONT_FAMILY = "'Inter','Hind Siliguri',sans-serif"
 
-# is_article matches on the resolved absolute URL. Both sites list plenty of
-# nav/category/tag links alongside real stories; a numeric article-id segment
-# in the path is what reliably tells them apart.
+# English-language editions only (2026-09-01: dropped Bangla-only sources).
+# is_article matches on the resolved absolute URL - a numeric article-id
+# segment in the path reliably tells real stories apart from nav/category links.
 NEWS_CHANNELS = [
-    {
-        "name": "Star News BD",
-        "url": "https://starnews.com.bd/",
-        "is_article": re.compile(r"starnews\.com\.bd/[a-z-]+/\d{3,}/").search,
-    },
     {
         "name": "The Daily Star",
         "url": "https://www.thedailystar.net/todays-news",
-        # Daily Star article links are relative (resolved via urljoin below)
-        # and don't live directly under /news/, e.g. /sports/football/news/<slug>-<id>
+        # Article links are relative (resolved via urljoin below) and don't
+        # live directly under /news/, e.g. /sports/football/news/<slug>-<id>
         "is_article": re.compile(r"thedailystar\.net/.+-\d{5,}$").search,
     },
     {
         "name": "Ittefaq",
-        "url": "https://www.ittefaq.com.bd/",
-        # Links are protocol-relative (//www.ittefaq.com.bd/<id>/<slug>); urljoin below
+        "url": "https://en.ittefaq.com.bd/",  # English edition (Bangla is the default www.ittefaq.com.bd)
+        # Links are protocol-relative (//en.ittefaq.com.bd/<id>/<slug>); urljoin below
         # resolves those to https:// same as it does Daily Star's path-relative ones.
         "is_article": re.compile(r"ittefaq\.com\.bd/\d+/").search,
     },
-    {
-        "name": "bdnews24",
-        # bdnews24.com's main domain sits behind a Cloudflare JS challenge (like
-        # Jamuna TV); its Bangla edition subdomain doesn't and carries the same
-        # stories, so that's what's fetched here.
-        "url": "https://bangla.bdnews24.com/",
-        "is_article": re.compile(r"bdnews24\.com/[a-z]+/[0-9a-f]{8,}$").search,
-    },
-    {
-        "name": "Daily Campus",
-        "url": "https://www.thedailycampus.com/",
-        "is_article": re.compile(r"thedailycampus\.com/(?!section/)[a-z-]+/\d{4,}$").search,
-    },
-    # Jamuna TV (jamuna.tv) and Kalerkantho (kalerkantho.com) are not included:
-    # both sit behind Cloudflare (JS challenge / WAF block on every path tried,
-    # including /feed and /sitemap.xml) that a plain requests scraper can't
-    # pass - would need a real challenge-solving browser, out of scope here.
-    # Amardesh (amardesh.com) is not included either, for a different reason:
-    # it's a link directory to *other* newspapers' homepages and static
-    # reference pages (bank lists, flight schedules), not itself a source of
-    # original news articles - there's nothing there to extract.
+    # Dropped (no accessible English edition):
+    # - Star News BD (starnews.com.bd) - Bangla-only, no English edition found.
+    # - Daily Campus (thedailycampus.com) - Bangla-only, no English edition found.
+    # - bdnews24 - does publish in English (bdnews24.com), but that domain sits
+    #   behind a Cloudflare JS challenge; only their Bangla subdomain
+    #   (bangla.bdnews24.com) is actually reachable by a plain requests
+    #   scraper, so it doesn't qualify as an accessible English source.
+    #
+    # Jamuna TV (jamuna.tv), Kalerkantho (kalerkantho.com): Cloudflare-blocked
+    # on every path tried (JS challenge / WAF), same issue as bdnews24 above.
+    # Amardesh (amardesh.com): not a news publisher at all - a link directory
+    # to other outlets' homepages and static reference pages, nothing to extract.
 ]
 
 
@@ -205,58 +192,57 @@ def _brand_logo_data_uri():
     return f"data:image/{ext};base64,{encoded}"
 
 
-def generate_background_image(context):
-    """Best-effort low-opacity backdrop art from IMAGE_GEN_API_URL (e.g. a
-    deployed saurav-z/free-image-generation-api Cloudflare Worker).
+def fetch_background_image(data):
+    """Best-effort low-opacity backdrop from Pexels - real stock photography,
+    not AI-generated, chosen by the story's topic (falls back to location).
 
     This is deliberately NOT used for anything that needs to be exact - no
     logo, no brand colors, no text. It only ever sits behind the real
-    HTML/CSS text layer at low opacity, so an AI model's imprecision doesn't
-    matter here the way it would for the rest of the card. Returns None (and
-    the card just renders on the plain brand background) if unconfigured or
-    if the call fails - a flaky background image should never break a story.
+    HTML/CSS text layer at low opacity, so an unrelated stock photo being an
+    imperfect match doesn't matter the way it would for the rest of the
+    card. Returns None (card just renders on the plain brand background) if
+    unconfigured, no results, or the call fails.
     """
-    if not (IMAGE_GEN_API_URL and IMAGE_GEN_API_KEY):
+    if not PEXELS_API_KEY:
         return None
-    prompt = (
-        "Abstract minimalist editorial background illustration, muted colors, "
-        "soft shapes, no text, no faces, no logos, representing the theme: "
-        f"{context[:200]}"
-    )
+    query = data.get("issues") or data.get("location") or "news"
     try:
-        resp = requests.post(
-            IMAGE_GEN_API_URL,
-            headers={"Authorization": f"Bearer {IMAGE_GEN_API_KEY}", "Content-Type": "application/json"},
-            json={"prompt": prompt},
-            timeout=30,
+        resp = requests.get(
+            "https://api.pexels.com/v1/search",
+            headers={"Authorization": PEXELS_API_KEY},
+            params={"query": query, "per_page": 1, "orientation": "square"},
+            timeout=15,
         )
         resp.raise_for_status()
-        encoded = base64.b64encode(resp.content).decode()
+        photos = resp.json().get("photos") or []
+        if not photos:
+            return None
+        img_resp = requests.get(photos[0]["src"]["large"], timeout=15)
+        img_resp.raise_for_status()
+        encoded = base64.b64encode(img_resp.content).decode()
         return f"data:image/jpeg;base64,{encoded}"
     except requests.RequestException as e:
-        print(f"Background image generation skipped: {e}")
+        print(f"Background image fetch skipped: {e}")
         return None
 
 
 def render_image_cards(data):
-    """Renders one branded photocard for the story: a bigger logo, a location
-    pill in one corner, the news centered over a low-opacity generated
-    backdrop, and no source/vendor attribution anywhere on the card.
+    """Renders one branded photocard for the story: logo top-left, date
+    top-right, a location pill in the bottom-left corner, and the news
+    centered over a low-opacity stock-photo backdrop. No source/vendor
+    attribution anywhere on the card.
     """
     logo_uri = _brand_logo_data_uri()
     logo_html = (
-        # The logo's own background is white, same as the badge below - so
-        # instead of it showing up as a mismatched box against the gradient
-        # tint, it's a deliberate white "logo badge" with a soft shadow.
-        f'<div style="display:inline-flex; background:#ffffff; border-radius:16px; padding:14px 22px; '
-        f'box-shadow:0 8px 24px rgba(16,16,24,0.12);"><img src="{logo_uri}" style="height:110px; display:block;"></div>'
+        f'<img src="{logo_uri}" style="height:110px; display:block;">'
         if logo_uri
         else f'<div style="font-weight:800; font-size:34px; color:{BRAND_ACCENT_COLOR};">fastSloth News</div>'
     )
+    date_str = datetime.now().strftime("%d %b %Y")
     location = data.get("location") or "N/A"
     news_text = data.get("context", "N/A")
 
-    bg_image_uri = generate_background_image(news_text)
+    bg_image_uri = fetch_background_image(data)
     bg_layer_html = (
         f'<img src="{bg_image_uri}" style="position:absolute; inset:0; width:100%; height:100%; '
         f'object-fit:cover; opacity:0.16;">'
@@ -275,7 +261,10 @@ def render_image_cards(data):
             {bg_layer_html}
             <div style="position:absolute; inset:0; background:linear-gradient(135deg, {BRAND_ACCENT_COLOR}1a, transparent 60%);"></div>
             <div style="position:relative; z-index:1; display:flex; flex-direction:column; width:100%; height:100%; padding:56px; box-sizing:border-box; color:{BRAND_TEXT_COLOR}; font-family:{BRAND_FONT_FAMILY};">
-                <div>{logo_html}</div>
+                <div style="display:flex; justify-content:space-between; align-items:flex-start;">
+                    {logo_html}
+                    <div style="font-size:18px; font-weight:600; color:{BRAND_MUTED_COLOR};">{date_str}</div>
+                </div>
                 <div style="flex:1; display:flex; flex-direction:column; justify-content:center; align-items:center; text-align:center; gap:28px;">
                     <div style="width:64px; height:6px; border-radius:3px; background:{BRAND_ACCENT_COLOR};"></div>
                     <p style="font-size:46px; line-height:1.5; font-weight:800; max-width:880px; margin:0;">{news_text}</p>
