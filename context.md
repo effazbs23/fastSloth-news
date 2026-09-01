@@ -1,8 +1,9 @@
 # fastSloth — News Monitoring & Auto-Posting Pipeline
 
 Serverless, free-tier pipeline: scrapes news sites daily, extracts structured
-story data with Gemini, renders branded PNG cards, posts them to
-Facebook/Instagram/X, and logs telemetry a Next.js dashboard reads.
+story data with Groq (`openai/gpt-oss-120b`), renders branded PNG cards,
+posts them to Facebook/Instagram/X, and logs telemetry a Next.js dashboard
+reads.
 
 ## Architecture
 
@@ -26,7 +27,7 @@ Facebook/Instagram/X, and logs telemetry a Next.js dashboard reads.
 - **Pipeline**: `main_pipeline.py` — insert a `RUNNING` `cron_logs` row to get
   a run id → for each provider, scan the whole homepage listing (not just the
   first link) for unprocessed article URLs, up to `MAX_STORIES_PER_PROVIDER`
-  → fetch article text → Gemini structured extraction → Playwright renders 4
+  → fetch article text → Groq structured extraction → Playwright renders 4
   PNG cards (1080x1080) → publish to Meta/X for up to `MAX_SOCIAL_POSTS_PER_RUN`
   stories → insert each story tagged with the run's `cron_log_id` → update
   the `cron_logs` row with final status/counts. Runs once daily, so scanning
@@ -105,6 +106,26 @@ Facebook/Instagram/X, and logs telemetry a Next.js dashboard reads.
   candidate for that provider too, not just the failing story. Moved to a
   per-story `try/except` inside the loop.
 
+- **2026-09-01 — switched AI extraction from Gemini to Groq entirely**, given
+  how much churn the Gemini incidents above already were (dead SDK, dead
+  model, then the account-restriction wall). `parse_story_with_ai()` now
+  POSTs straight to Groq's OpenAI-compatible
+  `https://api.groq.com/openai/v1/chat/completions` with
+  `response_format: {"type": "json_object"}` — plain `requests` (already a
+  dependency), no new SDK. `google-genai` dropped from `requirements.txt`.
+  Model is `openai/gpt-oss-120b`; picked after listing live models with
+  `GET /openai/v1/models` (no Llama models were on the account at all -
+  Groq's hosted lineup has clearly moved on since training-data-era
+  assumptions would suggest, so don't trust a remembered model id here
+  either, re-check live if this needs revisiting) and confirming the
+  120b/20b free-tier rate limits are identical, so there's no cost to
+  picking the larger, better-quality model. One real quirk found via a live
+  test call: gpt-oss sometimes returns a field (e.g. `issues`) as a JSON
+  array even when told to return a plain string - `parse_story_with_ai()`
+  normalizes every field to a string before it reaches the DB, since
+  `news_items` columns are `TEXT` and psycopg2 would otherwise adapt a
+  Python list into a Postgres array literal instead of erroring loudly.
+
 ## Known ceilings (deliberate, not oversights)
 
 - **Image hosting**: Instagram's Graph API needs a public `image_url`, not
@@ -126,7 +147,7 @@ Facebook/Instagram/X, and logs telemetry a Next.js dashboard reads.
   doesn't dump a dozen posts on your socials at once).
 - Social publishing functions no-op (with a log line) when their platform's
   secrets aren't set, so the pipeline stays useful with only
-  `DATABASE_URL`/`GEMINI_API_KEY` configured.
+  `DATABASE_URL`/`GROQ_API_KEY` configured.
 - **Refresh button has no synchronous result**: it dispatches the GitHub
   Actions run and returns immediately; the actual scrape/extract/render work
   happens in Actions (Playwright and the social APIs don't run on Vercel),
@@ -147,7 +168,7 @@ Settings → Secrets and variables → Actions → New repository secret:
 | Secret | Required | Notes |
 |---|---|---|
 | `DATABASE_URL` | yes | pooled, `sslmode=require` |
-| `GEMINI_API_KEY` | yes | Google AI Studio, free tier |
+| `GROQ_API_KEY` | yes | console.groq.com, free tier |
 | `META_ACCESS_TOKEN` | optional | long-lived Page token |
 | `META_PAGE_ID` | optional | Facebook Page id |
 | `META_IG_USER_ID` | optional | linked IG business account id |
@@ -180,7 +201,7 @@ Refresh button, see below.
 ## Files
 
 - `main_pipeline.py` — the pipeline
-- `requirements.txt` — requests, beautifulsoup4, google-genai, psycopg2-binary, playwright
+- `requirements.txt` — requests, beautifulsoup4, psycopg2-binary, playwright
 - `schema.sql` — the two tables, plus `news_items.cron_log_id`
 - `.github/workflows/pipeline.yml` — cron + secrets wiring
 - `app/api/telemetry/route.js` — status + latest-batch data

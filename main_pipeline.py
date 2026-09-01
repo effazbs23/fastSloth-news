@@ -26,7 +26,6 @@ from urllib.parse import urljoin
 import psycopg2
 import requests
 from bs4 import BeautifulSoup
-from google import genai
 from playwright.sync_api import sync_playwright
 
 # DATABASE_URL must use the pooled connection (port 6543) with sslmode=require,
@@ -34,9 +33,11 @@ from playwright.sync_api import sync_playwright
 # Percent-encode special characters in the password (`[`->%5B, `]`->%5D, `@`->%40,
 # `#`->%23, `/`->%2F) or psycopg2 will fail to parse the URL / DNS-resolve the host.
 DB_URL = os.environ["DATABASE_URL"]
-gemini_client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-# gemini-2.5-flash shuts down 2026-10-16; bump this if that's already passed.
-GEMINI_MODEL = "gemini-3.5-flash"
+
+# Groq's chat completions API is OpenAI-compatible, so a plain requests.post()
+# (already a dependency) covers it - no SDK needed.
+GROQ_API_KEY = os.environ["GROQ_API_KEY"]
+GROQ_MODEL = "openai/gpt-oss-120b"
 
 # Optional - social publishing is skipped per-platform when its secrets are absent.
 META_ACCESS_TOKEN = os.environ.get("META_ACCESS_TOKEN")
@@ -149,22 +150,33 @@ def fetch_article_text(url, headers, max_chars=4000):
 
 def parse_story_with_ai(title, text):
     prompt = f"""
-    Analyze the news article below and return ONLY a JSON object:
+    Analyze the news article below and return ONLY a JSON object with exactly
+    these keys, each value a single plain string (never a list or nested object):
     {{
         "location": "location mentioned",
         "context": "1-2 sentence core summary",
         "accused_victim": "accused or victim details",
-        "issues": "core issues or topics"
+        "issues": "core issues or topics, as one comma-separated string"
     }}
     Article Title: {title}
     Article Text: {text[:2000]}
     """
-    res = gemini_client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=prompt,
-        config={"response_mime_type": "application/json"},
+    res = requests.post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+        json={
+            "model": GROQ_MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "response_format": {"type": "json_object"},
+            "temperature": 0.2,
+        },
+        timeout=30,
     )
-    return json.loads(res.text)
+    res.raise_for_status()
+    data = json.loads(res.json()["choices"][0]["message"]["content"])
+    # gpt-oss sometimes returns a field as a list even when told to use a
+    # plain string - normalize so it always fits the news_items TEXT columns.
+    return {k: (", ".join(map(str, v)) if isinstance(v, list) else str(v)) for k, v in data.items()}
 
 
 def render_image_cards(data, source_name):
