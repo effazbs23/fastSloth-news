@@ -77,10 +77,27 @@ NEWS_CHANNELS = [
         # resolves those to https:// same as it does Daily Star's path-relative ones.
         "is_article": re.compile(r"ittefaq\.com\.bd/\d+/").search,
     },
-    # Jamuna TV (jamuna.tv) is not included: the whole site sits behind a
-    # Cloudflare JS challenge ("Just a moment...") that blocks plain HTTP
-    # requests, including /feed and /sitemap.xml. Scraping it would need a
-    # real browser doing challenge-solving, which is out of scope here.
+    {
+        "name": "bdnews24",
+        # bdnews24.com's main domain sits behind a Cloudflare JS challenge (like
+        # Jamuna TV); its Bangla edition subdomain doesn't and carries the same
+        # stories, so that's what's fetched here.
+        "url": "https://bangla.bdnews24.com/",
+        "is_article": re.compile(r"bdnews24\.com/[a-z]+/[0-9a-f]{8,}$").search,
+    },
+    {
+        "name": "Daily Campus",
+        "url": "https://www.thedailycampus.com/",
+        "is_article": re.compile(r"thedailycampus\.com/(?!section/)[a-z-]+/\d{4,}$").search,
+    },
+    # Jamuna TV (jamuna.tv) and Kalerkantho (kalerkantho.com) are not included:
+    # both sit behind Cloudflare (JS challenge / WAF block on every path tried,
+    # including /feed and /sitemap.xml) that a plain requests scraper can't
+    # pass - would need a real challenge-solving browser, out of scope here.
+    # Amardesh (amardesh.com) is not included either, for a different reason:
+    # it's a link directory to *other* newspapers' homepages and static
+    # reference pages (bank lists, flight schedules), not itself a source of
+    # original news articles - there's nothing there to extract.
 ]
 
 

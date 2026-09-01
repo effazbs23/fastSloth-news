@@ -9,11 +9,20 @@ Facebook/Instagram/X, and logs telemetry a Next.js dashboard reads.
 - **Trigger**: GitHub Actions cron, `17 3 * * *` (once daily at 03:17 UTC),
   plus `workflow_dispatch` — fired both manually from the Actions tab and by
   the dashboard's **Refresh** button. `.github/workflows/pipeline.yml`.
-- **Providers**: Star News BD, The Daily Star, Ittefaq (`NEWS_CHANNELS` in
-  `main_pipeline.py`). Jamuna TV is deliberately excluded — its whole site
-  (including `/feed`, `/sitemap.xml`) sits behind a Cloudflare JS challenge
-  that a plain `requests` scraper can't pass; would need a real
-  challenge-solving browser to add, out of scope for this stack.
+- **Providers**: Star News BD, The Daily Star, Ittefaq, bdnews24 (via its
+  Bangla subdomain, see below), Daily Campus (`NEWS_CHANNELS` in
+  `main_pipeline.py`). Excluded, deliberately:
+  - **Jamuna TV, Kalerkantho** — sit behind Cloudflare (JS challenge or WAF
+    block on every path tried, including `/feed`/`/sitemap.xml`) that a plain
+    `requests` scraper can't pass; would need a real challenge-solving
+    browser, out of scope for this stack.
+  - **Amardesh** — not itself a news publisher: its homepage is a link
+    directory to *other* outlets' homepages (Kalerkantho, Bangladesh
+    Protidin, ...) and static reference pages (bank lists, flight
+    schedules), not original articles. Nothing there to extract.
+  - **bdnews24's main domain** (`bdnews24.com`) is also Cloudflare-blocked,
+    but its Bangla edition (`bangla.bdnews24.com`) isn't and carries the same
+    stories, so that subdomain is what's actually fetched.
 - **Pipeline**: `main_pipeline.py` — insert a `RUNNING` `cron_logs` row to get
   a run id → for each provider, scan the whole homepage listing (not just the
   first link) for unprocessed article URLs, up to `MAX_STORIES_PER_PROVIDER`
@@ -59,6 +68,22 @@ Facebook/Instagram/X, and logs telemetry a Next.js dashboard reads.
      with `urljoin()` and matching on a numeric article-id path segment
      instead (also tightened on Star News BD to stop matching `/tag/...`
      pages as if they were articles).
+
+- **2026-09-01 — zero stories extracted, all providers, after the above fix
+  too.** The `getaddrinfo` IPv4 monkeypatch at the top of `main_pipeline.py`
+  (there since the original scaffold, to work around a GitHub Actions
+  IPv6-vs-Postgres issue that turned out to not even apply to psycopg2's
+  connection path) crashed every `requests.get()` call:
+  `getaddrinfo() got multiple values for argument 'family'`. It did
+  `kwargs['family'] = socket.AF_INET` on top of `*args`, but on this runner's
+  Python/urllib3 stack `family` arrives positionally, so it collided with the
+  injected kwarg — caught by the per-provider `try/except`, so every provider
+  silently failed at the very first fetch, before scraping even started.
+  Fixed by giving the wrapper `family`'s real positional slot and just
+  hardcoding `AF_INET` in the call to the original function instead of
+  forwarding whatever was passed in. Verified against a live `requests.get()`
+  call, not just a compile check, since this exact class of bug (looks fine,
+  breaks on the actual call convention) is what caused it in the first place.
 
 ## Known ceilings (deliberate, not oversights)
 
