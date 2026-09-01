@@ -84,6 +84,26 @@ Facebook/Instagram/X, and logs telemetry a Next.js dashboard reads.
   forwarding whatever was passed in. Verified against a live `requests.get()`
   call, not just a compile check, since this exact class of bug (looks fine,
   breaks on the actual call convention) is what caused it in the first place.
+  Fixed independently (identical patch) by effazrayhan in `617fbd2` around
+  the same time this was diagnosed here.
+
+- **2026-09-01 — Gemini `403 PERMISSION_DENIED: Your project has been denied
+  access`.** Not a code bug - this is Google restricting the API key's
+  project, a currently-widespread free-tier issue per
+  [Google's own developer forum](https://discuss.ai.google.dev/t/403-permission-denied-project-denied-access/177102)
+  (AI Studio shows the project as "Restricted" / "Billing Tier: Unavailable"
+  even though `models.list` still returns 200). Options, in order of least
+  to most effort: check the project's status at
+  [aistudio.google.com](https://aistudio.google.com) → API keys; generate a
+  fresh key under a **different/new** Google Cloud project (the restriction
+  is project-scoped, and this is the most commonly reported fix on the
+  forum); or enable billing on the project (Gemini's free quota still
+  applies on a billing-enabled project, and those get flagged less often).
+  While investigating this, also found and fixed a separate robustness gap:
+  the per-provider `try/except` wrapped the *entire* scrape loop, so one
+  story's extraction failure (like this one) silently skipped every other
+  candidate for that provider too, not just the failing story. Moved to a
+  per-story `try/except` inside the loop.
 
 ## Known ceilings (deliberate, not oversights)
 

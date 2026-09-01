@@ -381,30 +381,36 @@ def run():
 
                 print(f"Processing new link from {channel['name']}: {title}")
 
-                # AI Extraction
-                article_text = fetch_article_text(href, headers)
-                data = parse_story_with_ai(title, article_text)
+                # One story's failure (AI extraction, rendering, publishing, ...)
+                # shouldn't take the rest of this provider's batch down with it.
+                try:
+                    # AI Extraction
+                    article_text = fetch_article_text(href, headers)
+                    data = parse_story_with_ai(title, article_text)
 
-                # Image Generation (3-5 slides)
-                cards = render_image_cards(data, channel['name'])
+                    # Image Generation (3-5 slides)
+                    cards = render_image_cards(data, channel['name'])
 
-                # Social Publishing (capped per run, see MAX_SOCIAL_POSTS_PER_RUN)
-                if social_posts_made < MAX_SOCIAL_POSTS_PER_RUN:
-                    publish_to_socials(cards, data, channel['name'])
-                    social_posts_made += 1
+                    # Social Publishing (capped per run, see MAX_SOCIAL_POSTS_PER_RUN)
+                    if social_posts_made < MAX_SOCIAL_POSTS_PER_RUN:
+                        publish_to_socials(cards, data, channel['name'])
+                        social_posts_made += 1
 
-                # DB Logging
-                conn = get_db()
-                cur = conn.cursor()
-                cur.execute("""
-                    INSERT INTO news_items (url, source, title, location, context, accused_victim, issues, cron_log_id)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING
-                """, (href, channel['name'], title, data.get('location'), data.get('context'), data.get('accused_victim'), data.get('issues'), log_id))
-                conn.commit()
-                cur.close()
-                conn.close()
+                    # DB Logging
+                    conn = get_db()
+                    cur = conn.cursor()
+                    cur.execute("""
+                        INSERT INTO news_items (url, source, title, location, context, accused_victim, issues, cron_log_id)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING
+                    """, (href, channel['name'], title, data.get('location'), data.get('context'), data.get('accused_victim'), data.get('issues'), log_id))
+                    conn.commit()
+                    cur.close()
+                    conn.close()
 
-                provider_counts[channel['name']] += 1
+                    provider_counts[channel['name']] += 1
+                except Exception as e:
+                    print(f"Error processing {href}: {e}")
+                    errors.append(f"{channel['name']} - {href}: {e}")
         except Exception as e:
             print(f"Error checking {channel['name']}: {e}")
             errors.append(f"{channel['name']}: {e}")
