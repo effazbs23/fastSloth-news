@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+card_*.png
+node_modules/
+.next/
+.env
+.env.local
