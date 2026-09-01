@@ -57,31 +57,49 @@ reads.
 
 ## Brand template
 
-`render_image_cards()` in `main_pipeline.py` draws every card from one shared
-frame - brand logo top-left, date top-right, a `📍 location · source` badge
-along the bottom - around whichever field (location/context/entities/issues)
-that particular slide highlights. Tokens to swap for the real brand kit, all
-at the top of `main_pipeline.py`:
+`render_image_cards()` in `main_pipeline.py` renders **one** card per story
+(not a 4-slide carousel - that was the original design, changed
+2026-09-01): a logo badge top-left, the news (`context`) centered in bold
+type over a subtle gradient tint, a small red accent rule above the
+headline, and a `📍 location` pill in the bottom-left corner. No date, no
+source/vendor attribution anywhere on the card or in the social caption -
+removed deliberately, not an oversight.
 
 - `BRAND_LOGO_PATH` = `assets/logo.png` (the real fastSloth News logo, resized
-  from the 1536x1024/1MB original down to 600x400/139KB - it only ever
-  renders at 56px tall, no reason to base64-embed the full-res file into
-  every card). Falls back to a plain text source-name label if the file is
-  ever missing, so a bad path never breaks a run.
+  from the 1536x1024/1MB original to 600x400/139KB - it renders at 110px
+  tall, no reason to base64-embed the full-res file into every card). Sits
+  inside its own white rounded "badge" with a soft shadow rather than placed
+  directly on the gradient background: the logo's PNG has a white
+  background itself, and `mix-blend-mode: multiply` (the usual fix for
+  this) turned out not to reach through the content wrapper's `z-index`
+  stacking context, so it stayed a visibly mismatched box until wrapped in
+  a deliberate badge instead - simpler and confirmed working, where the
+  blend-mode approach was confirmed *not* working, both by actually
+  rendering and looking at the PNG rather than reasoning about the CSS.
+  Falls back to a plain text label if the logo file is ever missing.
 - `BRAND_BG_COLOR` (`#ffffff`), `BRAND_ACCENT_COLOR` (`#f03018`),
   `BRAND_TEXT_COLOR` (`#101018`) are sampled straight from `assets/logo.png`
-  (clustered the most common non-background pixel colors - see git history
-  for the exact method) - not eyeballed. `BRAND_MUTED_COLOR` (`#6b7280`) is
-  a plain neutral gray, since the logo itself has no gray in it. White
-  background was a deliberate choice, not a default: the logo has a white
-  background too, so the corner sits flush instead of showing a mismatched
-  box. Verified by actually rendering a card locally (Playwright + a scratch
-  venv) and viewing the PNG before shipping, not just reasoning about the CSS.
-- `BRAND_FONT_FAMILY` - currently generic `sans-serif`; swap for a Google
-  Fonts name (Chromium can load it directly at render time, no font file to
-  manage) or add a `@font-face` pointing at a local file for a licensed font.
+  (clustered the most common non-background pixel colors), not eyeballed.
+- `BRAND_FONT_FAMILY` = `'Inter','Hind Siliguri',sans-serif`, loaded from
+  Google Fonts at render time. Inter for crisp modern Latin type; Hind
+  Siliguri so Bengali headlines (most of what this pipeline actually
+  extracts) render as real glyphs instead of tofu boxes or a generic
+  fallback - Chromium picks whichever font in the stack has each character.
+  Confirmed by rendering a card with real Bengali `context` text, not
+  assumed.
 - Card size is 1080x1080 (`viewport` in `render_image_cards()`) - change if a
   different aspect ratio is needed (e.g. 1080x1350 portrait, 1080x1920 Story).
+- **Background art**: `generate_background_image()` optionally calls a
+  deployed `saurav-z/free-image-generation-api` Cloudflare Worker (or
+  anything with the same `{"prompt": ...} -> image bytes` shape) for a
+  low-opacity (0.16) backdrop image behind the text, built from a prompt
+  derived from `context`. This is the one place that AI image generator
+  actually fits: since it only ever sits at low opacity behind the precise
+  HTML/CSS text layer, its imprecision on exact colors/logo/text doesn't
+  matter here the way it would for the rest of the card (see Incidents).
+  Needs `IMAGE_GEN_API_URL` (the deployed Worker's URL) and
+  `IMAGE_GEN_API_KEY` - without them, cards just render on the plain brand
+  background, no error.
 
 I evaluated `saurav-z/free-image-generation-api` (a Cloudflare Workers /
 Stable Diffusion XL text-to-image API) for this and deliberately did not use
@@ -91,6 +109,17 @@ pipeline actually extracts. HTML/CSS→PNG via Playwright is deterministic and
 was already in place, so it's what got extended instead.
 
 ## Incidents
+
+- **2026-09-01 — consolidated to one card per story; fixed a bug this
+  introduced.** Instagram's Graph API requires 2+ children for a `CAROUSEL`
+  media post; `publish_to_meta()` always built one regardless of image
+  count, which was fine when every story rendered 4 cards but would 400 now
+  that it's always exactly 1. Fixed by posting a single image directly
+  (`image_url` + `caption`, no `media_type`/`is_carousel_item`) when there's
+  only one URL, keeping the carousel path for if this ever goes back to
+  multi-image. Caught by reading the actual Graph API behavior, not
+  assumed - this is the kind of thing that would've only surfaced as a
+  confusing 400 in production otherwise.
 
 - **2026-09-01 — zero stories extracted, both providers.** Root causes:
   1. `google-generativeai` (sunset 2025-08-31) + `gemini-1.5-flash` (fully
@@ -219,6 +248,8 @@ Settings → Secrets and variables → Actions → New repository secret:
 | `SUPABASE_URL` | for storage/IG | e.g. `https://xxxxx.supabase.co` — same project as `DATABASE_URL` |
 | `SUPABASE_SERVICE_ROLE_KEY` | for storage/IG | Settings → API in the Supabase dashboard |
 | `SUPABASE_STORAGE_BUCKET` | optional | defaults to `photocards` — create a **public** bucket with this name in Storage |
+| `IMAGE_GEN_API_URL` | optional | a deployed `saurav-z/free-image-generation-api` Worker URL, for the low-opacity card backdrop |
+| `IMAGE_GEN_API_KEY` | optional | that Worker's `API_KEY` |
 | `META_ACCESS_TOKEN` | optional | long-lived Page token |
 | `META_PAGE_ID` | optional | Facebook Page id |
 | `META_IG_USER_ID` | optional | linked IG business account id |

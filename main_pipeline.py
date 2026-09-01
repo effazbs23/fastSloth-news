@@ -21,7 +21,6 @@ import re
 import time
 import urllib.parse
 import uuid
-from datetime import datetime
 from urllib.parse import urljoin
 
 import psycopg2
@@ -56,13 +55,21 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")  # e.g. https://xxxxx.supabase.co
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
 SUPABASE_STORAGE_BUCKET = os.environ.get("SUPABASE_STORAGE_BUCKET", "photocards")
 
+# Optional low-opacity card backdrop - a deployed saurav-z/free-image-generation-api
+# Cloudflare Worker (or any API with the same {"prompt": ...} -> image bytes shape).
+# Cards render fine without it, just on the plain brand background.
+IMAGE_GEN_API_URL = os.environ.get("IMAGE_GEN_API_URL")
+IMAGE_GEN_API_KEY = os.environ.get("IMAGE_GEN_API_KEY")
+
 # --- Brand template tokens, sampled from assets/logo.png (fastSloth News) ---
 BRAND_LOGO_PATH = "assets/logo.png"  # falls back to a text label if this file is missing
 BRAND_BG_COLOR = "#ffffff"       # logo's background - keeps the logo's corner seamless
 BRAND_ACCENT_COLOR = "#f03018"   # red-orange from the sloth icon's gradient
 BRAND_TEXT_COLOR = "#101018"     # near-black, matches the "fast"/"news" wordmark
-BRAND_MUTED_COLOR = "#6b7280"    # neutral gray for secondary text (not in the logo itself)
-BRAND_FONT_FAMILY = "sans-serif"  # swap for a Google Fonts name once one is picked
+# Inter for crisp modern Latin type, Hind Siliguri so Bengali headlines render
+# correctly instead of falling back to a generic/missing glyph font - Chromium
+# picks whichever font in the stack actually has each character's glyph.
+BRAND_FONT_FAMILY = "'Inter','Hind Siliguri',sans-serif"
 
 # is_article matches on the resolved absolute URL. Both sites list plenty of
 # nav/category/tag links alongside real stories; a numeric article-id segment
@@ -198,58 +205,99 @@ def _brand_logo_data_uri():
     return f"data:image/{ext};base64,{encoded}"
 
 
-def render_image_cards(data, source_name):
-    """Converts story data into 3-5 visual cards using HTML template rendering.
+def generate_background_image(context):
+    """Best-effort low-opacity backdrop art from IMAGE_GEN_API_URL (e.g. a
+    deployed saurav-z/free-image-generation-api Cloudflare Worker).
 
-    Every card shares the same frame - brand logo, date, and a location badge -
-    around whichever field that slide highlights.
+    This is deliberately NOT used for anything that needs to be exact - no
+    logo, no brand colors, no text. It only ever sits behind the real
+    HTML/CSS text layer at low opacity, so an AI model's imprecision doesn't
+    matter here the way it would for the rest of the card. Returns None (and
+    the card just renders on the plain brand background) if unconfigured or
+    if the call fails - a flaky background image should never break a story.
     """
-    cards = [
-        {"title": "LOCATION", "content": data.get("location", "N/A")},
-        {"title": "CONTEXT", "content": data.get("context", "N/A")},
-        {"title": "KEY ENTITIES", "content": data.get("accused_victim", "N/A")},
-        {"title": "ISSUES", "content": data.get("issues", "N/A")}
-    ]
+    if not (IMAGE_GEN_API_URL and IMAGE_GEN_API_KEY):
+        return None
+    prompt = (
+        "Abstract minimalist editorial background illustration, muted colors, "
+        "soft shapes, no text, no faces, no logos, representing the theme: "
+        f"{context[:200]}"
+    )
+    try:
+        resp = requests.post(
+            IMAGE_GEN_API_URL,
+            headers={"Authorization": f"Bearer {IMAGE_GEN_API_KEY}", "Content-Type": "application/json"},
+            json={"prompt": prompt},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        encoded = base64.b64encode(resp.content).decode()
+        return f"data:image/jpeg;base64,{encoded}"
+    except requests.RequestException as e:
+        print(f"Background image generation skipped: {e}")
+        return None
 
+
+def render_image_cards(data):
+    """Renders one branded photocard for the story: a bigger logo, a location
+    pill in one corner, the news centered over a low-opacity generated
+    backdrop, and no source/vendor attribution anywhere on the card.
+    """
     logo_uri = _brand_logo_data_uri()
     logo_html = (
-        f'<img src="{logo_uri}" style="height:56px;">'
+        # The logo's own background is white, same as the badge below - so
+        # instead of it showing up as a mismatched box against the gradient
+        # tint, it's a deliberate white "logo badge" with a soft shadow.
+        f'<div style="display:inline-flex; background:#ffffff; border-radius:16px; padding:14px 22px; '
+        f'box-shadow:0 8px 24px rgba(16,16,24,0.12);"><img src="{logo_uri}" style="height:110px; display:block;"></div>'
         if logo_uri
-        else f'<div style="font-weight:bold; font-size:22px; color:{BRAND_ACCENT_COLOR};">{source_name.upper()}</div>'
+        else f'<div style="font-weight:800; font-size:34px; color:{BRAND_ACCENT_COLOR};">fastSloth News</div>'
     )
-    date_str = datetime.now().strftime("%d %b %Y")
     location = data.get("location") or "N/A"
+    news_text = data.get("context", "N/A")
+
+    bg_image_uri = generate_background_image(news_text)
+    bg_layer_html = (
+        f'<img src="{bg_image_uri}" style="position:absolute; inset:0; width:100%; height:100%; '
+        f'object-fit:cover; opacity:0.16;">'
+        if bg_image_uri
+        else ""
+    )
+
+    html_content = f"""
+    <html>
+    <head>
+        <link rel="preconnect" href="https://fonts.googleapis.com">
+        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@600;800&family=Hind+Siliguri:wght@600;700&display=swap" rel="stylesheet">
+    </head>
+    <body style="margin:0; padding:0; width:1080px; height:1080px; background:{BRAND_BG_COLOR}; box-sizing:border-box;">
+        <div style="position:relative; width:100%; height:100%; overflow:hidden;">
+            {bg_layer_html}
+            <div style="position:absolute; inset:0; background:linear-gradient(135deg, {BRAND_ACCENT_COLOR}1a, transparent 60%);"></div>
+            <div style="position:relative; z-index:1; display:flex; flex-direction:column; width:100%; height:100%; padding:56px; box-sizing:border-box; color:{BRAND_TEXT_COLOR}; font-family:{BRAND_FONT_FAMILY};">
+                <div>{logo_html}</div>
+                <div style="flex:1; display:flex; flex-direction:column; justify-content:center; align-items:center; text-align:center; gap:28px;">
+                    <div style="width:64px; height:6px; border-radius:3px; background:{BRAND_ACCENT_COLOR};"></div>
+                    <p style="font-size:46px; line-height:1.5; font-weight:800; max-width:880px; margin:0;">{news_text}</p>
+                </div>
+                <div>
+                    <span style="display:inline-flex; align-items:center; gap:8px; background:{BRAND_ACCENT_COLOR}; color:#ffffff; font-weight:700; font-size:20px; padding:12px 24px; border-radius:999px;">📍 {location}</span>
+                </div>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
 
     story_id = uuid.uuid4().hex[:8]
-    generated_files = []
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_page(viewport={"width": 1080, "height": 1080})
-
-        for idx, card in enumerate(cards):
-            html_content = f"""
-            <html>
-            <body style="margin:0; padding:0; width:1080px; height:1080px; background:{BRAND_BG_COLOR}; color:{BRAND_TEXT_COLOR}; font-family:{BRAND_FONT_FAMILY}; box-sizing:border-box;">
-                <div style="display:flex; flex-direction:column; width:100%; height:100%; padding:40px; box-sizing:border-box;">
-                    <div style="display:flex; justify-content:space-between; align-items:center;">
-                        {logo_html}
-                        <div style="font-size:16px; color:{BRAND_MUTED_COLOR};">{date_str}</div>
-                    </div>
-                    <div style="flex:1; display:flex; flex-direction:column; justify-content:center; align-items:center; text-align:center;">
-                        <h2 style="color:{BRAND_MUTED_COLOR}; letter-spacing:2px; font-size:24px;">{card['title']}</h2>
-                        <p style="font-size:36px; line-height:1.4; font-weight:600; max-width:900px;">{card['content']}</p>
-                    </div>
-                    <div style="font-size:16px; color:{BRAND_ACCENT_COLOR};">📍 {location} &nbsp;&middot;&nbsp; {source_name}</div>
-                </div>
-            </body>
-            </html>
-            """
-            page.set_content(html_content)
-            path = f"card_{story_id}_{idx + 1}.png"
-            page.screenshot(path=path)
-            generated_files.append(path)
+        page.set_content(html_content)
+        path = f"card_{story_id}.png"
+        page.screenshot(path=path)
         browser.close()
-    return generated_files
+    return [path]
 
 
 def upload_to_storage(local_path):
@@ -315,28 +363,36 @@ def publish_to_meta(public_urls, caption):
         timeout=15,
     ).raise_for_status()
 
-    # Instagram: build a carousel container from each image, then publish it.
+    # Instagram: a single photo posts directly - CAROUSEL requires 2+ children,
+    # which no longer happens now that each story renders exactly one card.
     if META_IG_USER_ID:
-        child_ids = []
-        for url in public_urls:
-            resp = requests.post(
+        if len(public_urls) == 1:
+            container = requests.post(
                 f"https://graph.facebook.com/v19.0/{META_IG_USER_ID}/media",
-                data={"image_url": url, "is_carousel_item": "true", "access_token": META_ACCESS_TOKEN},
+                data={"image_url": public_urls[0], "caption": caption, "access_token": META_ACCESS_TOKEN},
                 timeout=15,
             )
-            resp.raise_for_status()
-            child_ids.append(resp.json()["id"])
+        else:
+            child_ids = []
+            for url in public_urls:
+                resp = requests.post(
+                    f"https://graph.facebook.com/v19.0/{META_IG_USER_ID}/media",
+                    data={"image_url": url, "is_carousel_item": "true", "access_token": META_ACCESS_TOKEN},
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                child_ids.append(resp.json()["id"])
 
-        container = requests.post(
-            f"https://graph.facebook.com/v19.0/{META_IG_USER_ID}/media",
-            data={
-                "media_type": "CAROUSEL",
-                "caption": caption,
-                "children": ",".join(child_ids),
-                "access_token": META_ACCESS_TOKEN,
-            },
-            timeout=15,
-        )
+            container = requests.post(
+                f"https://graph.facebook.com/v19.0/{META_IG_USER_ID}/media",
+                data={
+                    "media_type": "CAROUSEL",
+                    "caption": caption,
+                    "children": ",".join(child_ids),
+                    "access_token": META_ACCESS_TOKEN,
+                },
+                timeout=15,
+            )
         container.raise_for_status()
         requests.post(
             f"https://graph.facebook.com/v19.0/{META_IG_USER_ID}/media_publish",
@@ -402,8 +458,9 @@ def publish_to_x(images, caption):
     print("Published card 1 + summary to X.")
 
 
-def publish_to_socials(images, public_urls, data, source):
-    caption = f"[{source}] {data.get('context')}\n\n#News #Updates"
+def publish_to_socials(images, public_urls, data):
+    # No source/vendor attribution in the caption, matching the card itself.
+    caption = f"{data.get('context')}\n\n#News #Updates"
     try:
         publish_to_meta(public_urls, caption)
     except requests.HTTPError as e:
@@ -456,14 +513,14 @@ def run():
                     data = parse_story_with_ai(title, article_text)
 
                     # Image Generation (3-5 slides)
-                    cards = render_image_cards(data, channel['name'])
+                    cards = render_image_cards(data)
 
                     # Archive every card to storage, regardless of the social-posting cap below
                     public_urls = archive_cards_to_storage(cards)
 
                     # Social Publishing (capped per run, see MAX_SOCIAL_POSTS_PER_RUN)
                     if social_posts_made < MAX_SOCIAL_POSTS_PER_RUN:
-                        publish_to_socials(cards, public_urls, data, channel['name'])
+                        publish_to_socials(cards, public_urls, data)
                         social_posts_made += 1
 
                     # DB Logging
