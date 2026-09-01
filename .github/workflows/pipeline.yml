@@ -2,8 +2,8 @@ name: News Automation Pipeline
 
 on:
   schedule:
-    - cron: '17 * * * *' # Runs hourly at minute 17 (prevents queue spikes)
-  workflow_dispatch:
+    - cron: '17 3 * * *' # Runs once daily at 03:17 UTC (off-peak, avoids queue spikes)
+  workflow_dispatch: # also triggered on demand by the dashboard's Refresh button
 
 permissions:
   contents: write # lets the pipeline commit generated card PNGs for public URLs

@@ -96,6 +96,30 @@ def is_processed(url):
     return exists
 
 
+def start_run_log():
+    """Insert a RUNNING cron_logs row up front so news_items can be tagged with it."""
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("INSERT INTO cron_logs (status, fetched_per_provider, total_fetched) VALUES ('RUNNING', '{}', 0) RETURNING id")
+    log_id = cur.fetchone()[0]
+    conn.commit()
+    cur.close()
+    conn.close()
+    return log_id
+
+
+def finish_run_log(log_id, status, provider_counts):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE cron_logs SET status = %s, fetched_per_provider = %s, total_fetched = %s WHERE id = %s",
+        (status, json.dumps(provider_counts), sum(provider_counts.values()), log_id),
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
 def fetch_article_text(url, headers, max_chars=4000):
     """Fetch the article page and pull its paragraph text for AI extraction."""
     res = requests.get(url, headers=headers, timeout=10)
@@ -304,58 +328,71 @@ def publish_to_socials(images, data, source):
         print(f"X publish failed: {e.response.text if e.response is not None else e}")
 
 
+# Runs once daily now, so a provider's homepage listing (which shows roughly
+# the last day of stories) is scanned in full instead of stopping at the
+# first unprocessed link.
+# ponytail: flat safety caps rather than real rate-limiting - fine for a
+# handful of homepages/day, revisit if a provider ever floods the listing.
+MAX_STORIES_PER_PROVIDER = 20
+MAX_SOCIAL_POSTS_PER_RUN = 3  # keep FB/IG/X from getting a day's backlog dumped on them at once
+
+
 def run():
     headers = {"User-Agent": "Mozilla/5.0"}
     provider_counts = {c["name"]: 0 for c in NEWS_CHANNELS}
     errors = []
+    log_id = start_run_log()
+    social_posts_made = 0
 
     for channel in NEWS_CHANNELS:
+        seen_hrefs = set()
         try:
             res = requests.get(channel["url"], headers=headers, timeout=10)
             soup = BeautifulSoup(res.text, "html.parser")
 
             for a in soup.find_all("a", href=True):
                 href, title = urljoin(channel["url"], a['href']), a.get_text(strip=True)
-                if channel["is_article"](href) and len(title) > 20:
-                    if not is_processed(href):
-                        print(f"Processing new link from {channel['name']}: {title}")
+                if href in seen_hrefs or not channel["is_article"](href) or len(title) <= 20:
+                    continue
+                seen_hrefs.add(href)
+                if is_processed(href):
+                    continue
+                if provider_counts[channel['name']] >= MAX_STORIES_PER_PROVIDER:
+                    break
 
-                        # AI Extraction
-                        article_text = fetch_article_text(href, headers)
-                        data = parse_story_with_ai(title, article_text)
+                print(f"Processing new link from {channel['name']}: {title}")
 
-                        # Image Generation (3-5 slides)
-                        cards = render_image_cards(data, channel['name'])
+                # AI Extraction
+                article_text = fetch_article_text(href, headers)
+                data = parse_story_with_ai(title, article_text)
 
-                        # Social Publishing
-                        publish_to_socials(cards, data, channel['name'])
+                # Image Generation (3-5 slides)
+                cards = render_image_cards(data, channel['name'])
 
-                        # DB Logging
-                        conn = get_db()
-                        cur = conn.cursor()
-                        cur.execute("""
-                            INSERT INTO news_items (url, source, title, location, context, accused_victim, issues)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING
-                        """, (href, channel['name'], title, data.get('location'), data.get('context'), data.get('accused_victim'), data.get('issues')))
-                        conn.commit()
-                        cur.close()
-                        conn.close()
+                # Social Publishing (capped per run, see MAX_SOCIAL_POSTS_PER_RUN)
+                if social_posts_made < MAX_SOCIAL_POSTS_PER_RUN:
+                    publish_to_socials(cards, data, channel['name'])
+                    social_posts_made += 1
 
-                        provider_counts[channel['name']] += 1
-                        break  # Process 1 new story per provider per run
+                # DB Logging
+                conn = get_db()
+                cur = conn.cursor()
+                cur.execute("""
+                    INSERT INTO news_items (url, source, title, location, context, accused_victim, issues, cron_log_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING
+                """, (href, channel['name'], title, data.get('location'), data.get('context'), data.get('accused_victim'), data.get('issues'), log_id))
+                conn.commit()
+                cur.close()
+                conn.close()
+
+                provider_counts[channel['name']] += 1
         except Exception as e:
             print(f"Error checking {channel['name']}: {e}")
             errors.append(f"{channel['name']}: {e}")
 
     # Write telemetry execution log - always, even when no new articles were found.
     status = "SUCCESS" if not errors else ("PARTIAL" if sum(provider_counts.values()) > 0 else "ERROR")
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("INSERT INTO cron_logs (status, fetched_per_provider, total_fetched) VALUES (%s, %s, %s)",
-                (status, json.dumps(provider_counts), sum(provider_counts.values())))
-    conn.commit()
-    cur.close()
-    conn.close()
+    finish_run_log(log_id, status, provider_counts)
 
 
 if __name__ == "__main__":
