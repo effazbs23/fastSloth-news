@@ -4,9 +4,11 @@ import socket
 # managed Postgres hosts (Supabase/Neon pooler) to an IPv6 address first, which
 # fails with "Network is unreachable" since the runner has no IPv6 route.
 orig_getaddrinfo = socket.getaddrinfo
-def getaddrinfo_ipv4(*args, **kwargs):
-    kwargs['family'] = socket.AF_INET
-    return orig_getaddrinfo(*args, **kwargs)
+def getaddrinfo_ipv4(host, port, family=0, type=0, proto=0, flags=0):
+    # family is force-overridden below, not forwarded - forwarding it as both
+    # a positional arg (from callers like urllib3) and a kwarg raised
+    # "got multiple values for argument 'family'" and broke every requests.get().
+    return orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
 
 socket.getaddrinfo = getaddrinfo_ipv4
 
