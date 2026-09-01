@@ -68,6 +68,17 @@ NEWS_CHANNELS = [
         # and don't live directly under /news/, e.g. /sports/football/news/<slug>-<id>
         "is_article": re.compile(r"thedailystar\.net/.+-\d{5,}$").search,
     },
+    {
+        "name": "Ittefaq",
+        "url": "https://www.ittefaq.com.bd/",
+        # Links are protocol-relative (//www.ittefaq.com.bd/<id>/<slug>); urljoin below
+        # resolves those to https:// same as it does Daily Star's path-relative ones.
+        "is_article": re.compile(r"ittefaq\.com\.bd/\d+/").search,
+    },
+    # Jamuna TV (jamuna.tv) is not included: the whole site sits behind a
+    # Cloudflare JS challenge ("Just a moment...") that blocks plain HTTP
+    # requests, including /feed and /sitemap.xml. Scraping it would need a
+    # real browser doing challenge-solving, which is out of scope here.
 ]
 
 

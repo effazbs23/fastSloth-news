@@ -8,6 +8,11 @@ Facebook/Instagram/X, and logs telemetry a Next.js dashboard reads.
 
 - **Trigger**: GitHub Actions cron, `17 * * * *` (hourly, off the top of the
   hour to dodge GitHub's queue spikes). `.github/workflows/pipeline.yml`.
+- **Providers**: Star News BD, The Daily Star, Ittefaq (`NEWS_CHANNELS` in
+  `main_pipeline.py`). Jamuna TV is deliberately excluded — its whole site
+  (including `/feed`, `/sitemap.xml`) sits behind a Cloudflare JS challenge
+  that a plain `requests` scraper can't pass; would need a real
+  challenge-solving browser to add, out of scope for this stack.
 - **Pipeline**: `main_pipeline.py` — fetch provider pages → dedupe against
   `news_items.url` → fetch full article text → Gemini structured
   extraction → Playwright renders 4 PNG cards (1080x1080) → publish to
