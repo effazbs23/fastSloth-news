@@ -47,9 +47,15 @@ reads.
   every post after the first spaced a randomized 1-2 minutes apart → update
   the `cron_logs` row with final status/counts → delete every Storage object
   that isn't under today's folder, so previous days' cards are removed on every
-  run. Processing is serial per story (extract, check date, render, archive,
-  claim, publish, log - in that order), which is what "queued" photocard
-  generation meant in practice; no separate queue infra was added.
+  run. Two phases: **(1) prepare** — article fetch + publish-date gate + Groq
+  extraction run concurrently in a small thread pool (`_prepare_story`,
+  `ThreadPoolExecutor(max_workers=4)`), collapsing N serial I/O round-trips
+  into ~one; **(2) publish** — strictly serial per story, one shared Playwright
+  browser is reused across every card render (no per-card Chromium launch), one
+  shared psycopg2 connection (`get_db()` reuses a module-level connection), and
+  social posts spaced `SOCIAL_POST_INTERVAL_RANGE` apart. The claim-before-post
+  DB guard and the single posted-order loop are what keep double-posting
+  impossible (posting order never races between runs).
 - **DB**: Postgres (Supabase/Neon), pooled connection on port 6543,
   `sslmode=require`. Schema in `schema.sql`, safe to re-run (uses
   `IF NOT EXISTS`/idempotent `ALTER`) — re-run it against your existing DB

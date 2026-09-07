@@ -22,6 +22,7 @@ import re
 import time
 import urllib.parse
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from urllib.parse import urljoin
 from zoneinfo import ZoneInfo
@@ -139,7 +140,13 @@ NEWS_CHANNELS = [
 ]
 
 
+_shared_conn = None
+
+
 def get_db():
+    global _shared_conn
+    if _shared_conn is not None:
+        return _shared_conn
     # connect_timeout makes a stalled/unreachable pooled connection fail fast
     # instead of hanging the whole run forever (psycopg2's default is no
     # timeout at all - it can block indefinitely on a dead network path).
@@ -149,7 +156,17 @@ def get_db():
     with conn.cursor() as cur:
         cur.execute("SET statement_timeout = 20000")
     conn.commit()
+    _shared_conn = conn
     return conn
+
+
+def _close_shared_conn():
+    global _shared_conn
+    if _shared_conn is not None:
+        try:
+            _shared_conn.close()
+        finally:
+            _shared_conn = None
 
 
 def is_processed(url):
@@ -158,7 +175,6 @@ def is_processed(url):
     cur.execute("SELECT 1 FROM news_items WHERE url = %s", (url,))
     exists = cur.fetchone() is not None
     cur.close()
-    conn.close()
     return exists
 
 
@@ -170,7 +186,6 @@ def start_run_log():
     log_id = cur.fetchone()[0]
     conn.commit()
     cur.close()
-    conn.close()
     return log_id
 
 
@@ -183,7 +198,6 @@ def finish_run_log(log_id, status, provider_counts):
     )
     conn.commit()
     cur.close()
-    conn.close()
 
 
 def _parse_datetime(s):
@@ -360,11 +374,15 @@ def fetch_background_image(data):
         return None
 
 
-def render_image_cards(data):
+def render_image_cards(data, browser=None):
     """Renders one branded photocard for the story: logo top-left, date
     top-right, a location pill in the bottom-left corner, and the news
     centered over a low-opacity stock-photo backdrop. No source/vendor
     attribution anywhere on the card.
+
+    browser is optional: pass a shared, already-launched Browser instance when
+    rendering a batch of cards. One browser reused across stories avoids the
+    per-story Chromium launch/close overhead that dominates a serial run.
     """
     logo_uri = _brand_logo_data_uri()
     logo_html = (
@@ -413,6 +431,16 @@ def render_image_cards(data):
     """
 
     story_id = uuid.uuid4().hex[:8]
+    if browser is not None:
+        page = browser.new_page(viewport={"width": 1080, "height": 1080})
+        try:
+            page.set_content(html_content)
+            path = f"card_{story_id}.png"
+            page.screenshot(path=path)
+        finally:
+            page.close()
+        return [path]
+
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_page(viewport={"width": 1080, "height": 1080})
@@ -655,6 +683,17 @@ MAX_SOCIAL_POSTS_PER_RUN = 30
 SOCIAL_POST_INTERVAL_RANGE = (60, 120)  # 1 - 2 minutes, randomized per gap
 
 
+def _prepare_story(channel_name, href, title, headers):
+    """fetch + today-filter + AI extraction for one candidate. Runs in a pool."""
+    article_text, published_at = fetch_article(href, headers)
+    published_date = as_dhaka(published_at).date() if published_at else None
+    if published_date != datetime.now(TZ_DHAKA).date():
+        print(f"Skipping {href}: published {published_at or 'unknown'} - not today's news.")
+        return None
+    data = parse_story_with_ai(title, article_text)
+    return channel_name, href, title, data
+
+
 def run():
     headers = {"User-Agent": "Mozilla/5.0"}
     provider_counts = {c["name"]: 0 for c in NEWS_CHANNELS}
@@ -663,8 +702,24 @@ def run():
     log_id = start_run_log()
     social_posts_made = 0
 
+    # One browser for the whole batch: reusing it across every card render
+    # skips the per-story Chromium launch/close that used to dominate a serial
+    # run with many stories. Fall back to launching per-card if it ever breaks.
+    browser = None
+    pw = None
+    try:
+        pw = sync_playwright().start()
+        browser = pw.chromium.launch()
+    except Exception as e:
+        print(f"Shared browser launch failed ({e}) - falling back to per-card launch.")
+
+    # Phase 1: collect + parallel prepare (fetch article, today-filter, AI extraction).
+    # The fetch + Groq round-trips are the slow I/O; running them concurrently
+    # collapses ~N serial round-trips into one round-trip of wall time.
+    batch = []
     for channel in NEWS_CHANNELS:
         seen_hrefs = set()
+        candidates = []
         try:
             res = requests.get(channel["url"], headers=headers, timeout=10)
             soup = BeautifulSoup(res.text, "html.parser")
@@ -678,71 +733,80 @@ def run():
                     continue
                 if provider_counts[channel['name']] >= MAX_STORIES_PER_PROVIDER:
                     break
-
+                candidates.append((href, title))
                 print(f"Processing new link from {channel['name']}: {title}")
 
-                # One story's failure (AI extraction, rendering, publishing, ...)
-                # shouldn't take the rest of this provider's batch down with it.
-                try:
-                    # Only today's news gets posted - anything published on an
-                    # earlier day (or a page that doesn't expose a publish date,
-                    # so it can't be proven to be today's) is skipped entirely.
-                    article_text, published_at = fetch_article(href, headers)
-                    published_date = as_dhaka(published_at).date() if published_at else None
-                    if published_date != datetime.now(TZ_DHAKA).date():
-                        print(f"Skipping {href}: published {published_at or 'unknown'} - not today's news.")
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                futures = [
+                    pool.submit(_prepare_story, channel["name"], href, title, headers)
+                    for href, title in candidates
+                ]
+                for fut in futures:
+                    try:
+                        prepared = fut.result()
+                    except Exception as e:
+                        # A single story's failure must not take the batch down.
+                        # No reliable href here, so just record the error.
+                        errors.append(f"{channel['name']}: prepare failed: {e}")
                         continue
+                    if prepared is not None:
+                        batch.append(prepared)
 
-                    # AI Extraction
-                    data = parse_story_with_ai(title, article_text)
-
-                    # Image Generation (3-5 slides)
-                    cards = render_image_cards(data)
-
-                    # Archive every card to storage, regardless of the social-posting cap below
-                    public_urls = archive_cards_to_storage(cards)
-
-                    # DB: claim this URL as processed BEFORE posting. Posting first
-                    # and saving after leaves a window where a crash/cancel loses the
-                    # insert but not the post, so the next hourly run would post the
-                    # same story again. Saving first makes double-posting impossible -
-                    # worst case a run cancelled mid-sleep leaves a story recorded
-                    # but unposted (it won't be retried), which is preferable.
-                    conn = get_db()
-                    cur = conn.cursor()
-                    cur.execute("""
-                        INSERT INTO news_items (url, source, title, location, context, accused_victim, issues, cron_log_id)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING
-                    """, (href, channel['name'], title, data.get('location'), data.get('context'), data.get('accused_victim'), data.get('issues'), log_id))
-                    claimed = cur.rowcount > 0
-                    conn.commit()
-                    cur.close()
-                    conn.close()
-
-                    if not claimed:
-                        # Another run got there first (e.g. queued run that started
-                        # before this one finished) - it owns this story, don't post it.
-                        print(f"Skipping posting {href}: already claimed by the db.")
-                        continue
-
-                    # Social Publishing (capped per run, see MAX_SOCIAL_POSTS_PER_RUN).
-                    # Posts after the first are spaced 5-10 min apart so new news
-                    # reaches the page gradually through the hour.
-                    if social_posts_made < MAX_SOCIAL_POSTS_PER_RUN:
-                        if social_posts_made > 0:
-                            delay = random.randint(*SOCIAL_POST_INTERVAL_RANGE)
-                            print(f"Waiting {delay}s before next post (5-10 min spacing)...")
-                            time.sleep(delay)
-                        publish_to_socials(cards, public_urls, data)
-                        social_posts_made += 1
-
-                    provider_counts[channel['name']] += 1
-                except Exception as e:
-                    print(f"Error processing {href}: {e}")
-                    errors.append(f"{channel['name']} - {href}: {e}")
         except Exception as e:
             print(f"Error checking {channel['name']}: {e}")
             errors.append(f"{channel['name']}: {e}")
+
+    print(f"Prepared {len(batch)} today-dated stories for rendering/posting.")
+
+    # Phase 2: serial render archive claim post - posting stays strictly serial,
+    # one at a time, spaced per SOCIAL_POST_INTERVAL_RANGE. The claim-before-post
+    # DB guard (ON CONFLICT DO NOTHING) keeps two runs from double-posting.
+    for channel_name, href, title, data in batch:
+        try:
+            # One story's failure (rendering, publishing, ...) shouldn't take
+            # the rest of the batch down with it.
+            cards = render_image_cards(data, browser=browser)
+
+            # Archive every card to storage, regardless of the social-posting cap below
+            public_urls = archive_cards_to_storage(cards)
+
+            # DB: claim this URL as processed BEFORE posting. Posting first
+            # and saving after leaves a window where a crash/cancel loses the
+            # insert but not the post, so the next hourly run would post the
+            # same story again. Saving first makes double-posting impossible -
+            # worst case a run cancelled mid-sleep leaves a story recorded
+            # but unposted (it won't be retried), which is preferable.
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO news_items (url, source, title, location, context, accused_victim, issues, cron_log_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING
+            """, (href, channel_name, title, data.get('location'), data.get('context'), data.get('accused_victim'), data.get('issues'), log_id))
+            claimed = cur.rowcount > 0
+            conn.commit()
+            cur.close()
+
+            if not claimed:
+                # Another run got there first (e.g. queued run that started
+                # before this one finished) - it owns this story, don't post it.
+                print(f"Skipping posting {href}: already claimed by the db.")
+                continue
+
+            # Social Publishing (capped per run, see MAX_SOCIAL_POSTS_PER_RUN).
+            # Posts after the first are spaced 1-2 min apart so new news
+            # reaches the page gradually instead of being dumped at once.
+            if social_posts_made < MAX_SOCIAL_POSTS_PER_RUN:
+                if social_posts_made > 0:
+                    delay = random.randint(*SOCIAL_POST_INTERVAL_RANGE)
+                    print(f"Waiting {delay}s before next post (1-2 min spacing)...")
+                    time.sleep(delay)
+                publish_to_socials(cards, public_urls, data)
+                social_posts_made += 1
+
+            provider_counts[channel_name] += 1
+        except Exception as e:
+            print(f"Error processing {href}: {e}")
+            errors.append(f"{channel_name} - {href}: {e}")
 
     # Storage keeps only today's cards - clean out anything uploaded on a
     # previous day. Best-effort so a storage hiccup can't fail the whole run;
@@ -755,6 +819,16 @@ def run():
     # Write telemetry execution log - always, even when no new articles were found.
     status = "SUCCESS" if not errors else ("PARTIAL" if sum(provider_counts.values()) > 0 else "ERROR")
     finish_run_log(log_id, status, provider_counts)
+
+    # Release the shared browser and DB connection once the batch is done.
+    if browser is not None:
+        try:
+            browser.close()
+        except Exception as e:
+            print(f"Closing shared browser failed: {e}")
+    if pw is not None:
+        pw.stop()
+    _close_shared_conn()
 
 
 if __name__ == "__main__":
