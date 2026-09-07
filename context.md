@@ -44,7 +44,7 @@ reads.
   `YYYY-MM-DD/` folder → **claim the URL in `news_items` BEFORE posting** (so a
   crash between post and save can never make the next run post the same story
   twice) → publish to Meta/X for up to `MAX_SOCIAL_POSTS_PER_RUN` stories, with
-  every post after the first spaced a randomized 5-10 minutes apart → update
+  every post after the first spaced a randomized 1-2 minutes apart → update
   the `cron_logs` row with final status/counts → delete every Storage object
   that isn't under today's folder, so previous days' cards are removed on every
   run. Processing is serial per story (extract, check date, render, archive,
@@ -259,12 +259,13 @@ free API with an open commercial-use license, so that's what's wired up.
 - **Story/social caps per run**: `MAX_STORIES_PER_PROVIDER = 20` (flat safety
   cap on AI calls per provider per run — not real rate-limiting; revisit if a
   homepage listing ever runs deeper than that within an hour) and
-  `MAX_SOCIAL_POSTS_PER_RUN = 6` (stories beyond that still get extracted and
+  `MAX_SOCIAL_POSTS_PER_RUN = 30` (stories beyond that still get extracted and
   stored/shown on the dashboard, just not posted to FB/IG/X).
 - **Cadence**: fetching happens once per hour on the hour. Each new
-  today-dated story is then posted one at a time, a randomized 5-10 minutes
-  apart (`SOCIAL_POST_INTERVAL_RANGE`, 300-600s), up to 6 per run — so a busy
-  hour sees roughly one post every 5-10 minutes. If no new news was published
+  today-dated story is then posted one at a time, a randomized 1-2 minutes
+  apart (`SOCIAL_POST_INTERVAL_RANGE`, 60-120s), up to 30 per run — so a busy
+  hour can clear a ~29-story batch (posts every 1-2 minutes, run finishes
+  within the hour before the next cron). If no new news was published
   today since the last run, nothing is posted that hour.
 - Social publishing functions no-op (with a log line) when their platform's
   secrets aren't set, so the pipeline stays useful with only

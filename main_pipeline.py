@@ -639,10 +639,11 @@ def publish_to_socials(images, public_urls, data):
 # handful of homepages/hour, revisit if a provider ever floods the listing.
 MAX_STORIES_PER_PROVIDER = 20
 # Post at most this many stories per run. New posts are spaced
-# SOCIAL_POST_INTERVAL_RANGE seconds apart (5-10 min), so a burst of new news
-# trickles out through the hour instead of being dumped on the page at once.
-MAX_SOCIAL_POSTS_PER_RUN = 6
-SOCIAL_POST_INTERVAL_RANGE = (300, 600)  # 5 - 10 minutes, randomized per gap
+# SOCIAL_POST_INTERVAL_RANGE seconds apart (1-2 min), so a burst of new news
+# still trickles out instead of being dumped on the page at once, but fast
+# enough that ~30 stories clear within the hour.
+MAX_SOCIAL_POSTS_PER_RUN = 30
+SOCIAL_POST_INTERVAL_RANGE = (60, 120)  # 1 - 2 minutes, randomized per gap
 
 
 def run():
