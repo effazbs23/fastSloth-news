@@ -140,7 +140,16 @@ NEWS_CHANNELS = [
 
 
 def get_db():
-    return psycopg2.connect(DB_URL)
+    # connect_timeout makes a stalled/unreachable pooled connection fail fast
+    # instead of hanging the whole run forever (psycopg2's default is no
+    # timeout at all - it can block indefinitely on a dead network path).
+    conn = psycopg2.connect(DB_URL, connect_timeout=10)
+    # Backstop for slow/stuck queries (e.g. a wedged pooled session): any
+    # single statement exceeding this is aborted rather than blocking forever.
+    with conn.cursor() as cur:
+        cur.execute("SET statement_timeout = 20000")
+    conn.commit()
+    return conn
 
 
 def is_processed(url):
@@ -650,6 +659,7 @@ def run():
     headers = {"User-Agent": "Mozilla/5.0"}
     provider_counts = {c["name"]: 0 for c in NEWS_CHANNELS}
     errors = []
+    print(f"Pipeline start: {datetime.now(TZ_DHAKA).isoformat()} - providers: {list(provider_counts)}")
     log_id = start_run_log()
     social_posts_made = 0
 

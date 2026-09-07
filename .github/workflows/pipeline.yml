@@ -5,9 +5,9 @@ on:
     - cron: '0 * * * *' # Runs every hour on the hour; picks up any news since the last run
   workflow_dispatch: # also triggered on demand by the dashboard's Refresh button
 
-# Posts are spaced 5-10 min apart inside a run, so a run can span ~an hour -
-# prevent the next hourly run from starting while the previous one is still
-# posting (would risk double-posting the same story). The queued run just starts late.
+# Posts are spaced 1-2 min apart inside a run - prevent the next hourly run from
+# starting while the previous one is still posting (would risk double-posting the
+# same story). The queued run just starts late.
 concurrency:
   group: fastsloth-pipeline
   cancel-in-progress: false
@@ -15,6 +15,9 @@ concurrency:
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
+    # Hard backstop so a hung script (e.g. a wedged DB connect) can never stall
+    # the runner forever and block the next hourly run via the concurrency group.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
