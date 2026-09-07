@@ -359,7 +359,7 @@ def render_image_cards(data):
     """
     logo_uri = _brand_logo_data_uri()
     logo_html = (
-        f'<img src="{logo_uri}" style="height:110px; display:block;">'
+        f'<img src="{logo_uri}" style="height:150px; display:block;">'
         if logo_uri
         else f'<div style="font-weight:800; font-size:34px; color:{BRAND_ACCENT_COLOR};">fastSloth News</div>'
     )
