@@ -13,15 +13,15 @@ reads.
   A `concurrency` group stops the next hourly run from starting while the
   previous one is still posting (a run with new news can span ~an hour), which
   also removes any risk of two runs doubling up on a story.
-- **Providers**: The Daily Star, Ittefaq (English edition,
-  `en.ittefaq.com.bd`) — `NEWS_CHANNELS` in `main_pipeline.py`.
-  English-only as of 2026-09-01 (was Star News BD/bdnews24/Daily Campus too,
-  all Bangla). Excluded, deliberately:
+- **Providers**: The Daily Star (English), Prothom Alo (Bangla — added
+  2026-09-07; Bangla content is deliberate, both the card's Hind Siliguri font
+  and `gpt-oss` handle it natively) — `NEWS_CHANNELS` in `main_pipeline.py`.
+  Ittefaq was removed 2026-09-07. Excluded, deliberately:
   - **Star News BD, Daily Campus** — Bangla-only, no English edition exists.
-  - **bdnews24** — does have an English edition (`bdnews24.com`), but that
-    domain is Cloudflare-blocked; only their Bangla subdomain
+  - **bdnews24** — does publish in English (`bdnews24.com`), but that domain
+    is Cloudflare-blocked; only their Bangla subdomain
     (`bangla.bdnews24.com`) is actually reachable by a plain `requests`
-    scraper, so it doesn't qualify as an *accessible* English source.
+    scraper, so it doesn't qualify as an accessible source.
   - **Jamuna TV, Kalerkantho** — sit behind Cloudflare (JS challenge or WAF
     block on every path tried, including `/feed`/`/sitemap.xml`) that a plain
     `requests` scraper can't pass; would need a real challenge-solving

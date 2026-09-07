@@ -100,9 +100,10 @@ BRAND_MUTED_COLOR = "#6b7280"    # neutral gray for the date - not in the logo i
 # picks whichever font in the stack actually has each character's glyph.
 BRAND_FONT_FAMILY = "'Inter','Hind Siliguri',sans-serif"
 
-# English-language editions only (2026-09-01: dropped Bangla-only sources).
-# is_article matches on the resolved absolute URL - a numeric article-id
-# segment in the path reliably tells real stories apart from nav/category links.
+# Sources are Daily Star (English) + Prothom Alo (Bengali, added 2026-09-07 -
+# deliberate: the card's Hind Siliguri font and gpt-oss handle Bengali natively,
+# so Bangla content posts fine). is_article matches on the resolved absolute URL
+# and relies on a pattern that reliably tells real stories from nav/category links.
 NEWS_CHANNELS = [
     {
         "name": "The Daily Star",
@@ -112,19 +113,24 @@ NEWS_CHANNELS = [
         "is_article": re.compile(r"thedailystar\.net/.+-\d{5,}$").search,
     },
     {
-        "name": "Ittefaq",
-        "url": "https://en.ittefaq.com.bd/",  # English edition (Bangla is the default www.ittefaq.com.bd)
-        # Links are protocol-relative (//en.ittefaq.com.bd/<id>/<slug>); urljoin below
-        # resolves those to https:// same as it does Daily Star's path-relative ones.
-        "is_article": re.compile(r"ittefaq\.com\.bd/\d+/").search,
+        "name": "Prothom Alo",
+        "url": "https://www.prothomalo.com/",
+        # Article pages are <section>/<hash-slug> - the slug is 8+ chars of
+        # lowercase alphanumerics that always contain a digit, which is what sets
+        # them apart from category pages like /bangladesh/district (no digits)
+        # or tagged feeds like /middle-east (hyphen, no digits).
+        "is_article": (
+            lambda href: bool(re.search(r"prothomalo\.com/[a-z-]+/[a-z0-9]+$", href))
+            and any(ch.isdigit() for ch in href.rsplit("/", 1)[-1])
+        ),
     },
-    # Dropped (no accessible English edition):
-    # - Star News BD (starnews.com.bd) - Bangla-only, no English edition found.
-    # - Daily Campus (thedailycampus.com) - Bangla-only, no English edition found.
+    # Dropped:
+    # - Ittefaq (2026-09-07) - removed in favor of Prothom Alo.
+    # - Star News BD (starnews.com.bd), Daily Campus (thedailycampus.com) - Bangla-only.
     # - bdnews24 - does publish in English (bdnews24.com), but that domain sits
     #   behind a Cloudflare JS challenge; only their Bangla subdomain
     #   (bangla.bdnews24.com) is actually reachable by a plain requests
-    #   scraper, so it doesn't qualify as an accessible English source.
+    #   scraper, so it doesn't qualify as an accessible source.
     #
     # Jamuna TV (jamuna.tv), Kalerkantho (kalerkantho.com): Cloudflare-blocked
     # on every path tried (JS challenge / WAF), same issue as bdnews24 above.
