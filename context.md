@@ -1,15 +1,18 @@
 # fastSloth — News Monitoring & Auto-Posting Pipeline
 
-Serverless, free-tier pipeline: scrapes news sites daily, extracts structured
+Serverless, free-tier pipeline: scrapes news sites hourly, extracts structured
 story data with Groq (`openai/gpt-oss-120b`), renders branded PNG cards,
 posts them to Facebook/Instagram/X, and logs telemetry a Next.js dashboard
 reads.
 
 ## Architecture
 
-- **Trigger**: GitHub Actions cron, `17 3 * * *` (once daily at 03:17 UTC),
+- **Trigger**: GitHub Actions cron, `0 * * * *` (every hour on the hour),
   plus `workflow_dispatch` — fired both manually from the Actions tab and by
   the dashboard's **Refresh** button. `.github/workflows/pipeline.yml`.
+  A `concurrency` group stops the next hourly run from starting while the
+  previous one is still posting (a run with new news can span ~an hour), which
+  also removes any risk of two runs doubling up on a story.
 - **Providers**: The Daily Star, Ittefaq (English edition,
   `en.ittefaq.com.bd`) — `NEWS_CHANNELS` in `main_pipeline.py`.
   English-only as of 2026-09-01 (was Star News BD/bdnews24/Daily Campus too,
@@ -30,17 +33,20 @@ reads.
 - **Pipeline**: `main_pipeline.py` — insert a `RUNNING` `cron_logs` row to get
   a run id → for each provider, scan the whole homepage listing (not just the
   first link) for unprocessed article URLs, up to `MAX_STORIES_PER_PROVIDER`
-  → fetch article text → Groq structured extraction → Playwright renders 4
-  branded PNG cards (1080x1080, logo/date/location on every card - see
-  Brand template below) → archive every card to Supabase Storage → publish to
-  Meta/X for up to `MAX_SOCIAL_POSTS_PER_RUN` stories → insert each story
-  tagged with the run's `cron_log_id` → update the `cron_logs` row with final
-  status/counts. Runs once daily, so scanning the full listing (not stopping
-  at the first match) is what covers "the last 24 hours" — no per-article
-  publish-date parsing needed since dedup on `news_items.url` handles re-runs.
-  Processing is inherently serial (one story fully finishes - extract, render,
-  archive, publish, insert - before the next starts), which is what "queued"
-  photocard generation meant in practice; no separate queue infra was added.
+  → fetch article text plus its publish date → skip anything not published
+  **today in Asia/Dhaka** (a page with no extractable date is skipped too, since
+  it can't be proven to be today's news) → Groq structured extraction →
+  Playwright renders one branded 1080x1080 PNG card (logo/date/location - see
+  Brand template below) → archive the card to Supabase Storage under a
+  `YYYY-MM-DD/` folder → **claim the URL in `news_items` BEFORE posting** (so a
+  crash between post and save can never make the next run post the same story
+  twice) → publish to Meta/X for up to `MAX_SOCIAL_POSTS_PER_RUN` stories, with
+  every post after the first spaced a randomized 5-10 minutes apart → update
+  the `cron_logs` row with final status/counts → delete every Storage object
+  that isn't under today's folder, so previous days' cards are removed on every
+  run. Processing is serial per story (extract, check date, render, archive,
+  claim, publish, log - in that order), which is what "queued" photocard
+  generation meant in practice; no separate queue infra was added.
 - **DB**: Postgres (Supabase/Neon), pooled connection on port 6543,
   `sslmode=require`. Schema in `schema.sql`, safe to re-run (uses
   `IF NOT EXISTS`/idempotent `ALTER`) — re-run it against your existing DB
@@ -222,19 +228,24 @@ free API with an open commercial-use license, so that's what's wired up.
   keys (`X_ACCESS_TOKEN`/`X_ACCESS_SECRET` from an app with read+write
   permission), not just an app-only bearer token.
 - **Story/social caps per run**: `MAX_STORIES_PER_PROVIDER = 20` (flat safety
-  cap on Gemini calls + GitHub commits per provider, not real rate-limiting —
-  revisit if a homepage listing ever runs deeper than that in 24h) and
-  `MAX_SOCIAL_POSTS_PER_RUN = 3` (stories beyond that still get extracted and
-  stored/shown on the dashboard, just not posted to FB/IG/X, so a busy day
-  doesn't dump a dozen posts on your socials at once).
+  cap on AI calls per provider per run — not real rate-limiting; revisit if a
+  homepage listing ever runs deeper than that within an hour) and
+  `MAX_SOCIAL_POSTS_PER_RUN = 6` (stories beyond that still get extracted and
+  stored/shown on the dashboard, just not posted to FB/IG/X).
+- **Cadence**: fetching happens once per hour on the hour. Each new
+  today-dated story is then posted one at a time, a randomized 5-10 minutes
+  apart (`SOCIAL_POST_INTERVAL_RANGE`, 300-600s), up to 6 per run — so a busy
+  hour sees roughly one post every 5-10 minutes. If no new news was published
+  today since the last run, nothing is posted that hour.
 - Social publishing functions no-op (with a log line) when their platform's
   secrets aren't set, so the pipeline stays useful with only
   `DATABASE_URL`/`GROQ_API_KEY` configured.
 - **Refresh button has no synchronous result**: it dispatches the GitHub
   Actions run and returns immediately; the actual scrape/extract/render work
-  happens in Actions (Playwright and the social APIs don't run on Vercel),
-  typically finishing in 1-3 minutes. The dashboard polls and updates itself
-  when it's done rather than blocking the request.
+  happens in Actions (Playwright and the social APIs don't run on Vercel).
+  With posts spaced 5-10 minutes apart, a manual refresh can take much longer
+  than the dashboard's 3-minute poll window — the run still completes in
+  Actions, the dashboard just reflects it on the next completed run.
 
 ## Setup
 
@@ -267,9 +278,9 @@ archiving cards, and skips Meta publishing entirely (both Facebook and
 Instagram need a public `image_url` from Storage now that the GitHub-commit
 workaround is gone).
 
-Workflow runs on the daily cron automatically, or trigger it manually from
-the Actions tab (`workflow_dispatch` is enabled) — or from the dashboard's
-Refresh button, see below.
+Workflow runs on the hourly cron automatically (`0 * * * *` UTC), or trigger
+it manually from the Actions tab (`workflow_dispatch` is enabled) — or from
+the dashboard's Refresh button, see below.
 
 ### 3. Dashboard on Vercel
 - Import this repo into Vercel.
