@@ -181,8 +181,46 @@ def _parse_datetime(s):
         return None
 
 
+_MONTH_RE = (
+    r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|"
+    r"Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+)
+
+
+def _search_text_date(soup):
+    """Fallback for pages that print the date in prose but expose no structured
+    date anywhere (meta/JSON-LD/<time> absent). The Daily Star is the case that
+    forced this: its articles carry no machine-readable publish date at all,
+    just human-readable text like '7 September 2026' / 'September 7, 2026'.
+    Interprets the match as Dhaka local time (both providers are Bangladeshi).
+    """
+    text = soup.get_text(" ", strip=True)
+    patterns = [
+        re.compile(rf"\b\d{{1,2}} {_MONTH_RE} \d{{4}}\b"),   # 7 September 2026
+        re.compile(rf"\b{_MONTH_RE} \d{{1,2}},? \d{{4}}\b"), # September 7, 2026
+        re.compile(r"\b\d{4}-\d{2}-\d{2}\b"),                # 2026-09-07
+    ]
+    for pat in patterns:
+        m = pat.search(text)
+        if not m:
+            continue
+        s = m.group(0).strip(".,")
+        try:
+            if "-" in s:
+                return datetime.strptime(s, "%Y-%m-%d")
+            for fmt in ("%d %B %Y", "%B %d %Y"):
+                try:
+                    return datetime.strptime(s, fmt)
+                except ValueError:
+                    continue
+        except ValueError:
+            continue
+    return None
+
+
 def extract_published_date(soup):
-    """Best-effort publish date from standard article meta tags / JSON-LD.
+    """Best-effort publish date from standard article meta tags / JSON-LD /
+    <time> tags, falling back to human-readable date text in the page.
 
     Returns an aware/naive datetime, or None if the page doesn't expose one -
     the caller then treats the story as "not today" rather than risk posting
@@ -210,7 +248,8 @@ def extract_published_date(soup):
     time_tag = soup.find("time", datetime=True)
     if time_tag:
         return _parse_datetime(time_tag["datetime"])
-    return None
+
+    return _search_text_date(soup)
 
 
 def as_dhaka(dt):
