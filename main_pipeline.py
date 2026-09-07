@@ -24,6 +24,7 @@ import urllib.parse
 import uuid
 from datetime import datetime
 from urllib.parse import urljoin
+from zoneinfo import ZoneInfo
 
 import psycopg2
 import requests
@@ -46,6 +47,15 @@ def _load_dotenv(path=".env"):
             os.environ.setdefault(key, value)
 
 _load_dotenv()
+
+# Both providers are Bangladeshi outlets, so "today" means today in Dhaka
+# (UTC+6), not the runner's UTC date - a story published just after midnight
+# BDT would otherwise be treated as yesterday's on a UTC clock.
+TZ_DHAKA = ZoneInfo("Asia/Dhaka")
+
+
+def today_str():
+    return datetime.now(TZ_DHAKA).strftime("%Y-%m-%d")
 
 # DATABASE_URL must use the pooled connection (port 6543) with sslmode=require,
 # e.g. postgresql://user:pass@host:6543/postgres?sslmode=require
@@ -161,12 +171,64 @@ def finish_run_log(log_id, status, provider_counts):
     conn.close()
 
 
-def fetch_article_text(url, headers, max_chars=4000):
-    """Fetch the article page and pull its paragraph text for AI extraction."""
+def _parse_datetime(s):
+    s = (s or "").strip()
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def extract_published_date(soup):
+    """Best-effort publish date from standard article meta tags / JSON-LD.
+
+    Returns an aware/naive datetime, or None if the page doesn't expose one -
+    the caller then treats the story as "not today" rather than risk posting
+    an old story (an undated article can't be proven to be today's news).
+    """
+    for prop in ("article:published_time", "og:published_time", "datePublished", "article:modified_time"):
+        meta = soup.find("meta", {"property": prop}) or soup.find("meta", {"name": prop})
+        content = meta.get("content") if meta else None
+        parsed = _parse_datetime(content)
+        if parsed:
+            return parsed
+
+    for script in soup.find_all("script", type="application/ld+json"):
+        try:
+            payload = json.loads(script.string)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        records = payload if isinstance(payload, list) else [payload]
+        for rec in records:
+            if isinstance(rec, dict) and rec.get("datePublished"):
+                parsed = _parse_datetime(str(rec["datePublished"]))
+                if parsed:
+                    return parsed
+
+    time_tag = soup.find("time", datetime=True)
+    if time_tag:
+        return _parse_datetime(time_tag["datetime"])
+    return None
+
+
+def as_dhaka(dt):
+    """Interprets/reprojects a datetime onto the Dhaka clock."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=TZ_DHAKA)
+    return dt.astimezone(TZ_DHAKA)
+
+
+def fetch_article(url, headers, max_chars=4000):
+    """Fetch the article page, returning its paragraph text and publish date."""
     res = requests.get(url, headers=headers, timeout=10)
     soup = BeautifulSoup(res.text, "html.parser")
     paragraphs = [p.get_text(strip=True) for p in soup.find_all("p")]
-    return " ".join(paragraphs)[:max_chars]
+    text = " ".join(paragraphs)[:max_chars]
+    return text, extract_published_date(soup)
 
 
 def parse_story_with_ai(title, text):
@@ -256,7 +318,7 @@ def render_image_cards(data):
         if logo_uri
         else f'<div style="font-weight:800; font-size:34px; color:{BRAND_ACCENT_COLOR};">fastSloth News</div>'
     )
-    date_str = datetime.now().strftime("%d %b %Y")
+    date_str = datetime.now(TZ_DHAKA).strftime("%d %b %Y")
     location = data.get("location") or "N/A"
     news_text = data.get("context", "N/A")
 
@@ -308,8 +370,10 @@ def render_image_cards(data):
 
 
 def upload_to_storage(local_path):
-    """Upload a card PNG to the Supabase Storage bucket and return its public URL."""
-    dest_path = os.path.basename(local_path)
+    """Upload a card PNG to today's folder in the Supabase Storage bucket and return its public URL."""
+    # Cards live under YYYY-MM-DD/ so the daily cleanup can tell today's files
+    # apart from yesterday's just by looking at the path prefix.
+    dest_path = f"{today_str()}/{os.path.basename(local_path)}"
     with open(local_path, "rb") as f:
         file_bytes = f.read()
     resp = requests.post(
@@ -338,6 +402,50 @@ def archive_cards_to_storage(images):
         except requests.HTTPError as e:
             print(f"Storage upload failed for {img}: {e.response.text if e.response is not None else e}")
     return urls
+
+
+def delete_stale_cards_from_storage():
+    """Delete every object in the bucket that isn't under today's YYYY-MM-DD/ folder.
+
+    Runs after archiving, so today's cards are never touched - anything else in
+    the bucket is a previous day's post and gets removed. Best-effort; failures
+    are logged but don't fail the run.
+    """
+    if not (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY):
+        return
+    today_prefix = today_str() + "/"
+    headers = {
+        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+        "Content-Type": "application/json",
+    }
+    stale = []
+    offset = 0
+    while True:
+        resp = requests.post(
+            f"{SUPABASE_URL}/storage/v1/object/list/{SUPABASE_STORAGE_BUCKET}",
+            headers=headers,
+            json={"prefix": "", "limit": 100, "offset": offset},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        batch = resp.json()
+        if not batch:
+            break
+        stale.extend(o["name"] for o in batch if not o["name"].startswith(today_prefix))
+        if len(batch) < 100:
+            break
+        offset += len(batch)
+
+    if not stale:
+        return
+    requests.delete(
+        f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_STORAGE_BUCKET}",
+        headers=headers,
+        json={"prefixes": stale},
+        timeout=30,
+    ).raise_for_status()
+    print(f"Deleted {len(stale)} stale card(s) from storage (kept {today_prefix}).")
 
 
 def publish_to_meta(public_urls, caption):
@@ -520,8 +628,16 @@ def run():
                 # One story's failure (AI extraction, rendering, publishing, ...)
                 # shouldn't take the rest of this provider's batch down with it.
                 try:
+                    # Only today's news gets posted - anything published on an
+                    # earlier day (or a page that doesn't expose a publish date,
+                    # so it can't be proven to be today's) is skipped entirely.
+                    article_text, published_at = fetch_article(href, headers)
+                    published_date = as_dhaka(published_at).date() if published_at else None
+                    if published_date != datetime.now(TZ_DHAKA).date():
+                        print(f"Skipping {href}: published {published_at or 'unknown'} - not today's news.")
+                        continue
+
                     # AI Extraction
-                    article_text = fetch_article_text(href, headers)
                     data = parse_story_with_ai(title, article_text)
 
                     # Image Generation (3-5 slides)
@@ -571,6 +687,14 @@ def run():
         except Exception as e:
             print(f"Error checking {channel['name']}: {e}")
             errors.append(f"{channel['name']}: {e}")
+
+    # Storage keeps only today's cards - clean out anything uploaded on a
+    # previous day. Best-effort so a storage hiccup can't fail the whole run;
+    # the next run will retry the cleanup anyway.
+    try:
+        delete_stale_cards_from_storage()
+    except Exception as e:
+        print(f"Stale-card storage cleanup failed: {e}")
 
     # Write telemetry execution log - always, even when no new articles were found.
     status = "SUCCESS" if not errors else ("PARTIAL" if sum(provider_counts.values()) > 0 else "ERROR")
