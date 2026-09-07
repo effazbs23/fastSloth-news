@@ -17,7 +17,10 @@ jobs:
     runs-on: ubuntu-latest
     # Hard backstop so a hung script (e.g. a wedged DB connect) can never stall
     # the runner forever and block the next hourly run via the concurrency group.
-    timeout-minutes: 30
+    # 90 min > a full 30-post batch (~50-55 min incl. 1-2 min post spacing + setup):
+    # enough headroom that a legitimately busy run completes without being killed
+    # midway through its posts, while still capping any true hang.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
