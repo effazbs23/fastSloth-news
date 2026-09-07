@@ -530,6 +530,29 @@ def run():
                     # Archive every card to storage, regardless of the social-posting cap below
                     public_urls = archive_cards_to_storage(cards)
 
+                    # DB: claim this URL as processed BEFORE posting. Posting first
+                    # and saving after leaves a window where a crash/cancel loses the
+                    # insert but not the post, so the next hourly run would post the
+                    # same story again. Saving first makes double-posting impossible -
+                    # worst case a run cancelled mid-sleep leaves a story recorded
+                    # but unposted (it won't be retried), which is preferable.
+                    conn = get_db()
+                    cur = conn.cursor()
+                    cur.execute("""
+                        INSERT INTO news_items (url, source, title, location, context, accused_victim, issues, cron_log_id)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING
+                    """, (href, channel['name'], title, data.get('location'), data.get('context'), data.get('accused_victim'), data.get('issues'), log_id))
+                    claimed = cur.rowcount > 0
+                    conn.commit()
+                    cur.close()
+                    conn.close()
+
+                    if not claimed:
+                        # Another run got there first (e.g. queued run that started
+                        # before this one finished) - it owns this story, don't post it.
+                        print(f"Skipping posting {href}: already claimed by the db.")
+                        continue
+
                     # Social Publishing (capped per run, see MAX_SOCIAL_POSTS_PER_RUN).
                     # Posts after the first are spaced 5-10 min apart so new news
                     # reaches the page gradually through the hour.
@@ -540,17 +563,6 @@ def run():
                             time.sleep(delay)
                         publish_to_socials(cards, public_urls, data)
                         social_posts_made += 1
-
-                    # DB Logging
-                    conn = get_db()
-                    cur = conn.cursor()
-                    cur.execute("""
-                        INSERT INTO news_items (url, source, title, location, context, accused_victim, issues, cron_log_id)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING
-                    """, (href, channel['name'], title, data.get('location'), data.get('context'), data.get('accused_victim'), data.get('issues'), log_id))
-                    conn.commit()
-                    cur.close()
-                    conn.close()
 
                     provider_counts[channel['name']] += 1
                 except Exception as e:
