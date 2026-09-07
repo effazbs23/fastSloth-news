@@ -256,7 +256,7 @@ free API with an open commercial-use license, so that's what's wired up.
   `requirements.txt` to exactly the libraries specified. Needs *user-context*
   keys (`X_ACCESS_TOKEN`/`X_ACCESS_SECRET` from an app with read+write
   permission), not just an app-only bearer token.
-- **Story/social caps per run**: `MAX_STORIES_PER_PROVIDER = 30` (flat safety
+- **Story/social caps per run**: `MAX_STORIES_PER_PROVIDER = 20` (flat safety
   cap on AI calls per provider per run — not real rate-limiting; revisit if a
   homepage listing ever runs deeper than that within an hour) and
   `MAX_SOCIAL_POSTS_PER_RUN = 30` (stories beyond that still get extracted and
