@@ -637,7 +637,7 @@ def publish_to_socials(images, public_urls, data):
 # hourly run naturally picks up only what's new since the last run.
 # ponytail: flat safety caps rather than real rate-limiting - fine for a
 # handful of homepages/hour, revisit if a provider ever floods the listing.
-MAX_STORIES_PER_PROVIDER = 20
+MAX_STORIES_PER_PROVIDER = 30
 # Post at most this many stories per run. New posts are spaced
 # SOCIAL_POST_INTERVAL_RANGE seconds apart (1-2 min), so a burst of new news
 # still trickles out instead of being dumped on the page at once, but fast
