@@ -29,6 +29,23 @@ import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
+# Load a local .env if present so the pipeline works identically when run
+# directly (picks up creds from .env) and in GitHub Actions (where secrets are
+# injected as real environment variables). Real env vars always win.
+def _load_dotenv(path=".env"):
+    if not os.path.exists(path):
+        return
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key, value = key.strip(), value.strip().strip('"').strip("'")
+            os.environ.setdefault(key, value)
+
+_load_dotenv()
+
 # DATABASE_URL must use the pooled connection (port 6543) with sslmode=require,
 # e.g. postgresql://user:pass@host:6543/postgres?sslmode=require
 # Percent-encode special characters in the password (`[`->%5B, `]`->%5D, `@`->%40,
@@ -335,7 +352,7 @@ def publish_to_meta(public_urls, caption):
     photo_ids = []
     for url in public_urls:
         resp = requests.post(
-            f"https://graph.facebook.com/v19.0/{META_PAGE_ID}/photos",
+            f"https://graph.facebook.com/v20.0/{META_PAGE_ID}/photos",
             data={"url": url, "published": "false", "access_token": META_ACCESS_TOKEN},
             timeout=15,
         )
@@ -343,7 +360,7 @@ def publish_to_meta(public_urls, caption):
         photo_ids.append(resp.json()["id"])
 
     requests.post(
-        f"https://graph.facebook.com/v19.0/{META_PAGE_ID}/feed",
+        f"https://graph.facebook.com/v20.0/{META_PAGE_ID}/feed",
         data={
             "message": caption,
             "access_token": META_ACCESS_TOKEN,
@@ -357,7 +374,7 @@ def publish_to_meta(public_urls, caption):
     if META_IG_USER_ID:
         if len(public_urls) == 1:
             container = requests.post(
-                f"https://graph.facebook.com/v19.0/{META_IG_USER_ID}/media",
+                f"https://graph.facebook.com/v20.0/{META_IG_USER_ID}/media",
                 data={"image_url": public_urls[0], "caption": caption, "access_token": META_ACCESS_TOKEN},
                 timeout=15,
             )
@@ -365,7 +382,7 @@ def publish_to_meta(public_urls, caption):
             child_ids = []
             for url in public_urls:
                 resp = requests.post(
-                    f"https://graph.facebook.com/v19.0/{META_IG_USER_ID}/media",
+                    f"https://graph.facebook.com/v20.0/{META_IG_USER_ID}/media",
                     data={"image_url": url, "is_carousel_item": "true", "access_token": META_ACCESS_TOKEN},
                     timeout=15,
                 )
@@ -373,7 +390,7 @@ def publish_to_meta(public_urls, caption):
                 child_ids.append(resp.json()["id"])
 
             container = requests.post(
-                f"https://graph.facebook.com/v19.0/{META_IG_USER_ID}/media",
+                f"https://graph.facebook.com/v20.0/{META_IG_USER_ID}/media",
                 data={
                     "media_type": "CAROUSEL",
                     "caption": caption,
@@ -384,7 +401,7 @@ def publish_to_meta(public_urls, caption):
             )
         container.raise_for_status()
         requests.post(
-            f"https://graph.facebook.com/v19.0/{META_IG_USER_ID}/media_publish",
+            f"https://graph.facebook.com/v20.0/{META_IG_USER_ID}/media_publish",
             data={"creation_id": container.json()["id"], "access_token": META_ACCESS_TOKEN},
             timeout=15,
         ).raise_for_status()
