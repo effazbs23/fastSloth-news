@@ -1,7 +1,7 @@
 // Triggers the GitHub Actions pipeline on demand. The dashboard runs on
 // Vercel and has no Playwright/social-posting infra of its own, so "refresh"
 // means asking GitHub Actions to run main_pipeline.py right now via
-// workflow_dispatch, same job the daily cron uses.
+// workflow_dispatch, same job the hourly cron uses.
 export async function POST() {
   const repo = process.env.GITHUB_REPO; // "owner/repo"
   const token = process.env.GITHUB_PAT; // classic PAT with `repo` scope (or fine-grained: Actions: write)

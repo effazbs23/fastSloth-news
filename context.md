@@ -33,9 +33,12 @@ reads.
 - **Pipeline**: `main_pipeline.py` — insert a `RUNNING` `cron_logs` row to get
   a run id → for each provider, scan the whole homepage listing (not just the
   first link) for unprocessed article URLs, up to `MAX_STORIES_PER_PROVIDER`
-  → fetch article text plus its publish date → skip anything not published
-  **today in Asia/Dhaka** (a page with no extractable date is skipped too, since
-  it can't be proven to be today's news) → Groq structured extraction →
+  → fetch article text plus its publish date (structured meta/JSON-LD/`<time>`
+  tags, falling back to human-readable date text — Daily Star exposes no
+  structured date at all, only prose like "7 September 2026") → skip anything
+  not published **today in Asia/Dhaka** (a page with no extractable date is
+  skipped too, since it can't be proven to be today's news) → Groq structured
+  extraction →
   Playwright renders one branded 1080x1080 PNG card (logo/date/location - see
   Brand template below) → archive the card to Supabase Storage under a
   `YYYY-MM-DD/` folder → **claim the URL in `news_items` BEFORE posting** (so a
@@ -220,6 +223,32 @@ free API with an open commercial-use license, so that's what's wired up.
   hosting" ceiling below - the git repo no longer grows with every story.
   `permissions: contents: write` and `GITHUB_TOKEN` dropped from the workflow
   since nothing writes to the repo from the pipeline anymore.
+
+- **2026-09-07 — today-only gate silently zeroed out The Daily Star.** The new
+  "only post today's news" filter requires a publish date per article; Daily
+  Star's pages expose none structurally (no `article:published_time`, no
+  JSON-LD, no `<time>`), so every story was classified "not today" and the
+  provider stopped fetching entirely — invisible, because the dashboard still
+  shows the last *completed* run. Fixed by teaching `extract_published_date()`
+  to fall back to human-readable dates in the page prose ("7 September 2026",
+  "September 7, 2026", ISO, interpreted as Asia/Dhaka). Verified against live
+  pages before shipping: both Daily Star and Ittefaq then report today's
+  stories again.
+
+- **2026-09-07 — swapped Ittefaq for Prothom Alo.** Per user request, Ittefaq
+  removed and Prothom Alo (`www.prothomalo.com`) added to `NEWS_CHANNELS`.
+  This is the first Bangla source — deliberate: both the card font (Hind
+  Siliguri) and `gpt-oss` handle Bengali natively. The shape the reference
+  crawler (sarafinmahtab/prothom-alo-news-content-crawler) used — `/sports/article/`
+  pages with `link_overlay` anchors — is long gone: section pages are now
+  JS-hydrated shells, and articles live at `<section>/<hash-slug>` (e.g.
+  `/bangladesh/3ucivyp32x`), server-rendered, with JSON-LD `datePublished`
+  that the today-filter already understands. `is_article` therefore matches a
+  final slug segment that is a word of 8+ lowercase alphanumerics *containing
+  at least one digit*, which excludes category/tag pages like
+  `/bangladesh/district` or `/middle-east`. Site is reachable by plain
+  `requests` (no Cloudflare), homepage yields ~8-16 candidates with today's
+  dates — live-verified at swap time.
 
 ## Known ceilings (deliberate, not oversights)
 - **X auth**: no `tweepy`/`requests-oauthlib` — OAuth 1.0a is hand-signed
