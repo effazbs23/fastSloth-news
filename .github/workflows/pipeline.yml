@@ -2,8 +2,15 @@ name: News Automation Pipeline
 
 on:
   schedule:
-    - cron: '17 3 * * *' # Runs once daily at 03:17 UTC (off-peak, avoids queue spikes)
+    - cron: '0 * * * *' # Runs every hour on the hour; picks up any news since the last run
   workflow_dispatch: # also triggered on demand by the dashboard's Refresh button
+
+# Posts are spaced 5-10 min apart inside a run, so a run can span ~an hour -
+# prevent the next hourly run from starting while the previous one is still
+# posting (would risk double-posting the same story). The queued run just starts late.
+concurrency:
+  group: fastsloth-pipeline
+  cancel-in-progress: false
 
 jobs:
   run-pipeline:

@@ -17,6 +17,7 @@ import hashlib
 import hmac
 import json
 import os
+import random
 import re
 import time
 import urllib.parse
@@ -477,13 +478,18 @@ def publish_to_socials(images, public_urls, data):
         print(f"X publish failed: {e.response.text if e.response is not None else e}")
 
 
-# Runs once daily now, so a provider's homepage listing (which shows roughly
+# Runs every hour now, so a provider's homepage listing (which shows roughly
 # the last day of stories) is scanned in full instead of stopping at the
-# first unprocessed link.
+# first unprocessed link. Dedup on news_items.url makes re-runs a no-op, so an
+# hourly run naturally picks up only what's new since the last run.
 # ponytail: flat safety caps rather than real rate-limiting - fine for a
-# handful of homepages/day, revisit if a provider ever floods the listing.
+# handful of homepages/hour, revisit if a provider ever floods the listing.
 MAX_STORIES_PER_PROVIDER = 20
-MAX_SOCIAL_POSTS_PER_RUN = 3  # keep FB/IG/X from getting a day's backlog dumped on them at once
+# Post at most this many stories per run. New posts are spaced
+# SOCIAL_POST_INTERVAL_RANGE seconds apart (5-10 min), so a burst of new news
+# trickles out through the hour instead of being dumped on the page at once.
+MAX_SOCIAL_POSTS_PER_RUN = 6
+SOCIAL_POST_INTERVAL_RANGE = (300, 600)  # 5 - 10 minutes, randomized per gap
 
 
 def run():
@@ -524,8 +530,14 @@ def run():
                     # Archive every card to storage, regardless of the social-posting cap below
                     public_urls = archive_cards_to_storage(cards)
 
-                    # Social Publishing (capped per run, see MAX_SOCIAL_POSTS_PER_RUN)
+                    # Social Publishing (capped per run, see MAX_SOCIAL_POSTS_PER_RUN).
+                    # Posts after the first are spaced 5-10 min apart so new news
+                    # reaches the page gradually through the hour.
                     if social_posts_made < MAX_SOCIAL_POSTS_PER_RUN:
+                        if social_posts_made > 0:
+                            delay = random.randint(*SOCIAL_POST_INTERVAL_RANGE)
+                            print(f"Waiting {delay}s before next post (5-10 min spacing)...")
+                            time.sleep(delay)
                         publish_to_socials(cards, public_urls, data)
                         social_posts_made += 1
 
