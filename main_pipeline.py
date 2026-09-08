@@ -84,11 +84,6 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")  # e.g. https://xxxxx.supabase.co
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
 SUPABASE_STORAGE_BUCKET = os.environ.get("SUPABASE_STORAGE_BUCKET", "photocards")
 
-# Optional low-opacity card backdrop - real stock photography from Pexels
-# (free, 200 req/hr, commercial use OK - api.pexels.com), not AI-generated.
-# Cards render fine without it, just on the plain brand background.
-PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY")
-
 # --- Brand template tokens, sampled from assets/logo.png (fastSloth News) ---
 BRAND_LOGO_PATH = "assets/logo.png"  # falls back to a text label if this file is missing; background removed (transparent)
 BRAND_BG_COLOR = "#ffffff"
@@ -326,45 +321,10 @@ def _brand_logo_data_uri():
     return f"data:image/{ext};base64,{encoded}"
 
 
-def fetch_background_image(data):
-    """Best-effort low-opacity backdrop from Pexels - real stock photography,
-    not AI-generated, chosen by the story's topic (falls back to location).
-
-    This is deliberately NOT used for anything that needs to be exact - no
-    logo, no brand colors, no text. It only ever sits behind the real
-    HTML/CSS text layer at low opacity, so an unrelated stock photo being an
-    imperfect match doesn't matter the way it would for the rest of the
-    card. Returns None (card just renders on the plain brand background) if
-    unconfigured, no results, or the call fails.
-    """
-    if not PEXELS_API_KEY:
-        return None
-    query = data.get("issues") or data.get("location") or "news"
-    try:
-        resp = requests.get(
-            "https://api.pexels.com/v1/search",
-            headers={"Authorization": PEXELS_API_KEY},
-            params={"query": query, "per_page": 1, "orientation": "square"},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        photos = resp.json().get("photos") or []
-        if not photos:
-            return None
-        img_resp = requests.get(photos[0]["src"]["large"], timeout=15)
-        img_resp.raise_for_status()
-        encoded = base64.b64encode(img_resp.content).decode()
-        return f"data:image/jpeg;base64,{encoded}"
-    except requests.RequestException as e:
-        print(f"Background image fetch skipped: {e}")
-        return None
-
-
 def render_image_cards(data):
     """Renders one branded photocard for the story: logo top-left, date
-    top-right, a location pill in the bottom-left corner, and the news
-    centered over a low-opacity stock-photo backdrop. No source/vendor
-    attribution anywhere on the card.
+    top-right, a location pill in the bottom-left corner, and the news in
+    bold centered type. No source/vendor attribution anywhere on the card.
     """
     logo_uri = _brand_logo_data_uri()
     logo_html = (
@@ -376,14 +336,6 @@ def render_image_cards(data):
     location = data.get("location") or "N/A"
     news_text = data.get("context", "N/A")
 
-    bg_image_uri = fetch_background_image(data)
-    bg_layer_html = (
-        f'<img src="{bg_image_uri}" style="position:absolute; inset:0; width:100%; height:100%; '
-        f'object-fit:cover; opacity:0.16;">'
-        if bg_image_uri
-        else ""
-    )
-
     html_content = f"""
     <html>
     <head>
@@ -392,7 +344,6 @@ def render_image_cards(data):
     </head>
     <body style="margin:0; padding:0; width:1080px; height:1080px; background:{BRAND_BG_COLOR}; box-sizing:border-box;">
         <div style="position:relative; width:100%; height:100%; overflow:hidden;">
-            {bg_layer_html}
             <div style="position:absolute; inset:0; background:linear-gradient(135deg, {BRAND_ACCENT_COLOR}1a, transparent 60%);"></div>
             <div style="position:relative; z-index:1; display:flex; flex-direction:column; width:100%; height:100%; padding:56px; box-sizing:border-box; color:{BRAND_TEXT_COLOR}; font-family:{BRAND_FONT_FAMILY};">
                 <div style="display:flex; justify-content:space-between; align-items:flex-start;">
@@ -644,14 +595,14 @@ def publish_to_socials(images, public_urls, data):
 # the last day of stories) is scanned in full instead of stopping at the
 # first unprocessed link. Dedup on news_items.url makes re-runs a no-op, so an
 # hourly run naturally picks up only what's new since the last run.
-# ponytail: flat safety caps rather than real rate-limiting - fine for a
-# handful of homepages/hour, revisit if a provider ever floods the listing.
 MAX_STORIES_PER_PROVIDER = 20
 # Post at most this many stories per run. New posts are spaced
-# SOCIAL_POST_INTERVAL_RANGE seconds apart (5-10 min), so a burst of new news
-# trickles out through the hour instead of being dumped on the page at once.
-MAX_SOCIAL_POSTS_PER_RUN = 6
-SOCIAL_POST_INTERVAL_RANGE = (300, 600)  # 5 - 10 minutes, randomized per gap
+# SOCIAL_POST_INTERVAL_RANGE seconds apart so a burst of new news trickles out
+# across the hour instead of being dumped on the page at once. The spacing is
+# kept tight enough that a full 10-post run finishes within the workflow's
+# 30-minute timeout (9 gaps x ~2.5min avg = ~22min of sleep).
+MAX_SOCIAL_POSTS_PER_RUN = 10
+SOCIAL_POST_INTERVAL_RANGE = (90, 180)  # 1.5 - 3 minutes, randomized per gap
 
 
 def run():
@@ -695,7 +646,7 @@ def run():
                     # AI Extraction
                     data = parse_story_with_ai(title, article_text)
 
-                    # Image Generation (3-5 slides)
+                    # Image Generation (single card)
                     cards = render_image_cards(data)
 
                     # Archive every card to storage, regardless of the social-posting cap below

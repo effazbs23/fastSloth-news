@@ -98,27 +98,17 @@ card or in the social caption - removed deliberately, not an oversight.
   by rendering a card with real Bengali `context` text, not assumed.
 - Card size is 1080x1080 (`viewport` in `render_image_cards()`) - change if a
   different aspect ratio is needed (e.g. 1080x1350 portrait, 1080x1920 Story).
-- **Background art**: `fetch_background_image()` optionally pulls a real
-  stock photo from Pexels (`api.pexels.com/v1/search`, free, 200 req/hr,
-  20,000/mo, commercial use OK) at low opacity (0.16) behind the text,
-  queried by the story's `issues` (falling back to `location`). This is the
-  one place external imagery fits at all: it only ever sits at low opacity
-  behind the precise HTML/CSS text layer, so an imperfect topical match
-  doesn't matter the way exact logo/text/color fidelity would for the rest
-  of the card. Needs `PEXELS_API_KEY` - without it, cards just render on
-  the plain gradient background, no error.
+- **Background art**: cards render on the plain brand gradient background only.
+  The Pexels stock-photo backdrop that previously sat behind the text at low
+  opacity (queried by the story's `issues`) was removed together with its
+  `PEXELS_API_KEY` on 2026-09-08.
 
 Earlier iterations of this backdrop used `saurav-z/free-image-generation-api`
 (AI-generated art) and, before that, nothing was used at all - deliberately,
 since an AI image model can't guarantee exact logo placement, exact colors,
-or legible (especially Bengali) text, which matters for the rest of the
-card. Real stock photography sidesteps that concern differently: it's not
-generated at all, just a topically-relevant photo behind low-opacity text.
-Pinterest and Freepik (raised as examples) were not used: neither has a
-public API for this kind of arbitrary keyword image-fetching, and reusing
-Pinterest content specifically is a real copyright/ToS problem since Pinterest
-mostly doesn't own the images pinned on it. Pexels does have a legitimate
-free API with an open commercial-use license, so that's what's wired up.
+or legible (especially Bengali) text, which matters for the rest of the card.
+That whole backdrop feature chain (AI generation → Pexels stock photos) was
+dropped on 2026-09-08; cards now render on the plain brand gradient only.
 
 ## Incidents
 
@@ -230,13 +220,14 @@ free API with an open commercial-use license, so that's what's wired up.
 - **Story/social caps per run**: `MAX_STORIES_PER_PROVIDER = 20` (flat safety
   cap on AI calls per provider per run — not real rate-limiting; revisit if a
   homepage listing ever runs deeper than that within an hour) and
-  `MAX_SOCIAL_POSTS_PER_RUN = 6` (stories beyond that still get extracted and
+  `MAX_SOCIAL_POSTS_PER_RUN = 10` (stories beyond that still get extracted and
   stored/shown on the dashboard, just not posted to FB/IG/X).
 - **Cadence**: fetching happens once per hour on the hour. Each new
-  today-dated story is then posted one at a time, a randomized 5-10 minutes
-  apart (`SOCIAL_POST_INTERVAL_RANGE`, 300-600s), up to 6 per run — so a busy
-  hour sees roughly one post every 5-10 minutes. If no new news was published
-  today since the last run, nothing is posted that hour.
+  today-dated story is then posted one at a time, a randomized 1.5-3 minutes
+  apart (`SOCIAL_POST_INTERVAL_RANGE`, 90-180s), up to 10 per run — so a busy
+  hour sees roughly one post every couple of minutes. The spacing is tuned so
+  a full 10-post run finishes inside the workflow's 30-minute timeout. If no
+  new news was published today since the last run, nothing is posted that hour.
 - Social publishing functions no-op (with a log line) when their platform's
   secrets aren't set, so the pipeline stays useful with only
   `DATABASE_URL`/`GROQ_API_KEY` configured.
@@ -265,7 +256,6 @@ Settings → Secrets and variables → Actions → New repository secret:
 | `SUPABASE_URL` | for storage/IG | e.g. `https://xxxxx.supabase.co` — same project as `DATABASE_URL` |
 | `SUPABASE_SERVICE_ROLE_KEY` | for storage/IG | Settings → API in the Supabase dashboard |
 | `SUPABASE_STORAGE_BUCKET` | optional | defaults to `photocards` — create a **public** bucket with this name in Storage |
-| `PEXELS_API_KEY` | optional | free at pexels.com/api, for the low-opacity card backdrop |
 | `META_ACCESS_TOKEN` | optional | long-lived Page token |
 | `META_PAGE_ID` | optional | Facebook Page id |
 | `META_IG_USER_ID` | optional | linked IG business account id |
