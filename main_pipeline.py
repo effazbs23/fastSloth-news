@@ -681,7 +681,7 @@ def run():
                     if social_posts_made < MAX_SOCIAL_POSTS_PER_RUN:
                         if social_posts_made > 0:
                             delay = random.randint(*SOCIAL_POST_INTERVAL_RANGE)
-                            print(f"Waiting {delay}s before next post (5-10 min spacing)...")
+                            print(f"Waiting {delay}s before next post (1.5-3 min spacing)...")
                             time.sleep(delay)
                         publish_to_socials(cards, public_urls, data)
                         social_posts_made += 1
