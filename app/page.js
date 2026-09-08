@@ -79,19 +79,22 @@ export default function Dashboard() {
       return;
     }
     setRefreshing(true);
+    setTab('kanban'); // watch stories land live instead of waiting for the run to finish
     let elapsed = 0;
     pollRef.current = setInterval(async () => {
-      elapsed += 5;
+      elapsed += 15;
       const fresh = await loadTelemetry();
       setData(fresh);
       const latest = fresh.cronLogs?.[0];
       const done = latest && latest.executed_at !== before && latest.status !== 'RUNNING';
-      if (done || elapsed >= 180) {
+      // Backstop matches the workflow's own 40min timeout (plus margin) -
+      // posts already show up as they're published well before this fires;
+      // this only stops polling once the run is truly done or wedged.
+      if (done || elapsed >= 2700) {
         clearInterval(pollRef.current);
         setRefreshing(false);
-        if (done) setTab('kanban');
       }
-    }, 5000);
+    }, 15000);
   };
 
   if (!data) return <div className="p-8">Loading Telemetry...</div>;
@@ -113,7 +116,8 @@ export default function Dashboard() {
       {refreshError && <p className="text-red-600 text-sm">{refreshError}</p>}
       {refreshing && (
         <p className="text-blue-600 text-sm">
-          Pipeline triggered on GitHub Actions — this can take a minute or two. This page updates automatically.
+          Pipeline triggered on GitHub Actions — stories appear below as soon as each is published,
+          no need to wait for the full run to finish.
         </p>
       )}
 

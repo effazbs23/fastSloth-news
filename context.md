@@ -53,16 +53,22 @@ reads.
   after pulling the `cron_log_id` column addition.
 - **Dashboard**: Next.js App Router on Vercel.
   - `app/api/telemetry/route.js` — `cron_logs` + `news_items`, plus
-    `latestBatch` (the most recent non-`RUNNING` run's stories, joined on
-    `cron_log_id`). Marked `force-dynamic` so it's never statically cached.
+    `latestBatch` (the *in-progress* run's stories the moment they're
+    claimed+posted, joined on `cron_log_id`; falls back to the last
+    completed run's batch only while the new run hasn't posted anything
+    yet — changed 2026-09-08 so a post doesn't wait for the whole run,
+    which can now take up to ~40min, to finish before showing up). Marked
+    `force-dynamic` so it's never statically cached.
   - `app/api/refresh/route.js` — POSTs a `workflow_dispatch` to the GitHub
     Actions API to run the pipeline on demand.
   - `app/page.js` — two tabs: **Telemetry** (existing status/history view)
     and **Last Fetched News** (Kanban board, one column per provider, cards
     show title/location/context/accused_victim/issues — sourced from
-    `latestBatch`, so it always reflects exactly one run's output). The
-    **Refresh** button calls `/api/refresh`, then polls `/api/telemetry`
-    every 5s (up to 3 min) until a new completed run shows up.
+    `latestBatch`, which now updates live during a run). The **Refresh**
+    button calls `/api/refresh`, switches to the Kanban tab immediately, and
+    polls `/api/telemetry` every 15s (up to 45min, matching the workflow's
+    40min timeout plus margin) so newly published stories keep appearing
+    without needing the run to finish.
 
 ## Brand template
 
@@ -248,9 +254,10 @@ dropped on 2026-09-08; cards now render on the plain brand gradient only.
 - **Refresh button has no synchronous result**: it dispatches the GitHub
   Actions run and returns immediately; the actual scrape/extract/render work
   happens in Actions (Playwright and the social APIs don't run on Vercel).
-  With posts spaced 5-10 minutes apart, a manual refresh can take much longer
-  than the dashboard's 3-minute poll window — the run still completes in
-  Actions, the dashboard just reflects it on the next completed run.
+  Resolved 2026-09-08: `latestBatch` used to only reflect the last *completed*
+  run, so a manual refresh's results wouldn't show until the whole run (which
+  can span the poll window) finished; it now reflects the in-progress run as
+  stories are posted, and the dashboard polls for up to 45min to match.
 
 ## Setup
 
