@@ -5,9 +5,10 @@ on:
     - cron: '0 * * * *' # Runs every hour on the hour; picks up any news since the last run
   workflow_dispatch: # also triggered on demand by the dashboard's Refresh button
 
-# Posts are spaced 5-10 min apart inside a run, so a run can span ~an hour -
-# prevent the next hourly run from starting while the previous one is still
-# posting (would risk double-posting the same story). The queued run just starts late.
+# Posts are spaced 0.5-1.5 min apart inside a run, so a run posting a full
+# batch can span ~20-30 min - prevent the next hourly run from starting while
+# the previous one is still posting (would risk double-posting the same
+# story). The queued run just starts late.
 concurrency:
   group: fastsloth-pipeline
   cancel-in-progress: false
@@ -16,8 +17,10 @@ jobs:
   run-pipeline:
     runs-on: ubuntu-latest
     # Hard backstop: a wedged run self-kills instead of holding the concurrency
-    # group forever and silently skipping the next hourly runs.
-    timeout-minutes: 30
+    # group forever and silently skipping the next hourly runs. 40 min gives a
+    # full MAX_SOCIAL_POSTS_PER_RUN=20 run (~19-30 min of spacing, see
+    # main_pipeline.py) comfortable headroom inside the hourly cadence.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

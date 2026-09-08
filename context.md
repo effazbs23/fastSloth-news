@@ -211,6 +211,17 @@ dropped on 2026-09-08; cards now render on the plain brand gradient only.
   `permissions: contents: write` and `GITHUB_TOKEN` dropped from the workflow
   since nothing writes to the repo from the pipeline anymore.
 
+- **2026-09-08 — raised the per-run post cap to 20 and fixed two bottlenecks
+  found while retuning for it.** (1) `is_processed()` opened a fresh pooled
+  DB connection *per candidate link* on a provider's homepage listing
+  (dozens of connect/query/close round-trips a run); replaced with
+  `get_processed_urls()`, one `WHERE url = ANY(...)` query per provider. (2)
+  `render_image_cards()` launched a brand-new Chromium process *per story*;
+  `run()` now launches one `browser` and passes it in, so 20+ renders in a
+  run share one process (and its font cache) instead of relaunching each
+  time. Both were silent - correct output either way - but ate into the time
+  budget that spacing 20 posts across an hour needs.
+
 ## Known ceilings (deliberate, not oversights)
 - **X auth**: no `tweepy`/`requests-oauthlib` — OAuth 1.0a is hand-signed
   with stdlib `hmac`/`hashlib` in `_oauth1_header()` to keep
@@ -220,14 +231,17 @@ dropped on 2026-09-08; cards now render on the plain brand gradient only.
 - **Story/social caps per run**: `MAX_STORIES_PER_PROVIDER = 20` (flat safety
   cap on AI calls per provider per run — not real rate-limiting; revisit if a
   homepage listing ever runs deeper than that within an hour) and
-  `MAX_SOCIAL_POSTS_PER_RUN = 10` (stories beyond that still get extracted and
-  stored/shown on the dashboard, just not posted to FB/IG/X).
+  `MAX_SOCIAL_POSTS_PER_RUN = 20` (stories beyond that still get extracted and
+  stored/shown on the dashboard, just not posted to FB/IG/X) — raised from 10
+  on 2026-09-08 so a busy hour posts everything it finds, up to 20/run.
 - **Cadence**: fetching happens once per hour on the hour. Each new
-  today-dated story is then posted one at a time, a randomized 1.5-3 minutes
-  apart (`SOCIAL_POST_INTERVAL_RANGE`, 90-180s), up to 10 per run — so a busy
-  hour sees roughly one post every couple of minutes. The spacing is tuned so
-  a full 10-post run finishes inside the workflow's 30-minute timeout. If no
-  new news was published today since the last run, nothing is posted that hour.
+  today-dated story is then posted one at a time, a randomized 0.5-1.5 minutes
+  apart (`SOCIAL_POST_INTERVAL_RANGE`, 30-90s), up to 20 per run — so a busy
+  hour sees roughly one post every minute. The spacing (tightened from 1.5-3
+  min on 2026-09-08, to leave room for double the posts) is tuned so a full
+  20-post run finishes inside the workflow's 40-minute timeout (raised from
+  30 min the same day). If no new news was published today since the last
+  run, nothing is posted that hour.
 - Social publishing functions no-op (with a log line) when their platform's
   secrets aren't set, so the pipeline stays useful with only
   `DATABASE_URL`/`GROQ_API_KEY` configured.

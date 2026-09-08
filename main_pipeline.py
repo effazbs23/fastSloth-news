@@ -147,14 +147,19 @@ def get_db():
     return conn
 
 
-def is_processed(url):
+def get_processed_urls(urls):
+    """Batch dedup check - one query per provider instead of opening a pooled
+    connection per candidate link (a homepage listing has dozens of them),
+    which was the run's biggest bottleneck."""
+    if not urls:
+        return set()
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT 1 FROM news_items WHERE url = %s", (url,))
-    exists = cur.fetchone() is not None
+    cur.execute("SELECT url FROM news_items WHERE url = ANY(%s)", (urls,))
+    processed = {row[0] for row in cur.fetchall()}
     cur.close()
     conn.close()
-    return exists
+    return processed
 
 
 def start_run_log():
@@ -321,10 +326,15 @@ def _brand_logo_data_uri():
     return f"data:image/{ext};base64,{encoded}"
 
 
-def render_image_cards(data):
+def render_image_cards(data, browser):
     """Renders one branded photocard for the story: logo top-left, date
     top-right, a location pill in the bottom-left corner, and the news in
     bold centered type. No source/vendor attribution anywhere on the card.
+
+    Takes the caller's already-launched Chromium `browser` instead of
+    launching a fresh one per story - across a 20+ story run that was the
+    single biggest source of wasted time (and re-downloaded the Google Fonts
+    on every launch instead of hitting the browser's own cache).
     """
     logo_uri = _brand_logo_data_uri()
     logo_html = (
@@ -364,13 +374,11 @@ def render_image_cards(data):
     """
 
     story_id = uuid.uuid4().hex[:8]
-    with sync_playwright() as p:
-        browser = p.chromium.launch()
-        page = browser.new_page(viewport={"width": 1080, "height": 1080})
-        page.set_content(html_content)
-        path = f"card_{story_id}.png"
-        page.screenshot(path=path)
-        browser.close()
+    page = browser.new_page(viewport={"width": 1080, "height": 1080})
+    page.set_content(html_content)
+    path = f"card_{story_id}.png"
+    page.screenshot(path=path)
+    page.close()
     return [path]
 
 
@@ -596,13 +604,14 @@ def publish_to_socials(images, public_urls, data):
 # first unprocessed link. Dedup on news_items.url makes re-runs a no-op, so an
 # hourly run naturally picks up only what's new since the last run.
 MAX_STORIES_PER_PROVIDER = 20
-# Post at most this many stories per run. New posts are spaced
-# SOCIAL_POST_INTERVAL_RANGE seconds apart so a burst of new news trickles out
-# across the hour instead of being dumped on the page at once. The spacing is
-# kept tight enough that a full 10-post run finishes within the workflow's
-# 30-minute timeout (9 gaps x ~2.5min avg = ~22min of sleep).
-MAX_SOCIAL_POSTS_PER_RUN = 10
-SOCIAL_POST_INTERVAL_RANGE = (90, 180)  # 1.5 - 3 minutes, randomized per gap
+# Post everything a run finds, up to this many stories per run (2 providers x
+# MAX_STORIES_PER_PROVIDER gives plenty of headroom above it). New posts are
+# spaced SOCIAL_POST_INTERVAL_RANGE seconds apart so a burst of new news
+# trickles out across the hour instead of being dumped on the page at once.
+# The spacing is kept tight enough that a full 20-post run finishes within
+# the workflow's 40-minute timeout (19 gaps x ~1min avg = ~19min of sleep).
+MAX_SOCIAL_POSTS_PER_RUN = 20
+SOCIAL_POST_INTERVAL_RANGE = (30, 90)  # 0.5 - 1.5 minutes, randomized per gap
 
 
 def run():
@@ -613,86 +622,97 @@ def run():
     log_id = start_run_log()
     social_posts_made = 0
 
-    for channel in NEWS_CHANNELS:
-        seen_hrefs = set()
-        try:
-            res = requests.get(channel["url"], headers=headers, timeout=10)
-            soup = BeautifulSoup(res.text, "html.parser")
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        for channel in NEWS_CHANNELS:
+            try:
+                res = requests.get(channel["url"], headers=headers, timeout=10)
+                soup = BeautifulSoup(res.text, "html.parser")
 
-            for a in soup.find_all("a", href=True):
-                href, title = urljoin(channel["url"], a['href']), a.get_text(strip=True)
-                if href in seen_hrefs or not channel["is_article"](href) or len(title) <= 20:
-                    continue
-                seen_hrefs.add(href)
-                if is_processed(href):
-                    continue
-                if provider_counts[channel['name']] >= MAX_STORIES_PER_PROVIDER:
-                    break
-
-                print(f"Processing new link from {channel['name']}: {title}")
-
-                # One story's failure (AI extraction, rendering, publishing, ...)
-                # shouldn't take the rest of this provider's batch down with it.
-                try:
-                    # Only today's news gets posted - anything published on an
-                    # earlier day (or a page that doesn't expose a publish date,
-                    # so it can't be proven to be today's) is skipped entirely.
-                    article_text, published_at = fetch_article(href, headers)
-                    published_date = as_dhaka(published_at).date() if published_at else None
-                    if published_date != datetime.now(TZ_DHAKA).date():
-                        print(f"Skipping {href}: published {published_at or 'unknown'} - not today's news.")
+                seen_hrefs = set()
+                candidates = []
+                for a in soup.find_all("a", href=True):
+                    href, title = urljoin(channel["url"], a['href']), a.get_text(strip=True)
+                    if href in seen_hrefs or not channel["is_article"](href) or len(title) <= 20:
                         continue
+                    seen_hrefs.add(href)
+                    candidates.append((href, title))
 
-                    # AI Extraction
-                    data = parse_story_with_ai(title, article_text)
+                # One dedup query for the whole listing instead of one per
+                # candidate link (see get_processed_urls).
+                processed = get_processed_urls([href for href, _ in candidates])
 
-                    # Image Generation (single card)
-                    cards = render_image_cards(data)
-
-                    # Archive every card to storage, regardless of the social-posting cap below
-                    public_urls = archive_cards_to_storage(cards)
-
-                    # DB: claim this URL as processed BEFORE posting. Posting first
-                    # and saving after leaves a window where a crash/cancel loses the
-                    # insert but not the post, so the next hourly run would post the
-                    # same story again. Saving first makes double-posting impossible -
-                    # worst case a run cancelled mid-sleep leaves a story recorded
-                    # but unposted (it won't be retried), which is preferable.
-                    conn = get_db()
-                    cur = conn.cursor()
-                    cur.execute("""
-                        INSERT INTO news_items (url, source, title, location, context, accused_victim, issues, cron_log_id)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING
-                    """, (href, channel['name'], title, data.get('location'), data.get('context'), data.get('accused_victim'), data.get('issues'), log_id))
-                    claimed = cur.rowcount > 0
-                    conn.commit()
-                    cur.close()
-                    conn.close()
-
-                    if not claimed:
-                        # Another run got there first (e.g. queued run that started
-                        # before this one finished) - it owns this story, don't post it.
-                        print(f"Skipping posting {href}: already claimed by the db.")
+                for href, title in candidates:
+                    if href in processed:
                         continue
+                    if provider_counts[channel['name']] >= MAX_STORIES_PER_PROVIDER:
+                        break
 
-                    # Social Publishing (capped per run, see MAX_SOCIAL_POSTS_PER_RUN).
-                    # Posts after the first are spaced 5-10 min apart so new news
-                    # reaches the page gradually through the hour.
-                    if social_posts_made < MAX_SOCIAL_POSTS_PER_RUN:
-                        if social_posts_made > 0:
-                            delay = random.randint(*SOCIAL_POST_INTERVAL_RANGE)
-                            print(f"Waiting {delay}s before next post (1.5-3 min spacing)...")
-                            time.sleep(delay)
-                        publish_to_socials(cards, public_urls, data)
-                        social_posts_made += 1
+                    print(f"Processing new link from {channel['name']}: {title}")
 
-                    provider_counts[channel['name']] += 1
-                except Exception as e:
-                    print(f"Error processing {href}: {e}")
-                    errors.append(f"{channel['name']} - {href}: {e}")
-        except Exception as e:
-            print(f"Error checking {channel['name']}: {e}")
-            errors.append(f"{channel['name']}: {e}")
+                    # One story's failure (AI extraction, rendering, publishing, ...)
+                    # shouldn't take the rest of this provider's batch down with it.
+                    try:
+                        # Only today's news gets posted - anything published on an
+                        # earlier day (or a page that doesn't expose a publish date,
+                        # so it can't be proven to be today's) is skipped entirely.
+                        article_text, published_at = fetch_article(href, headers)
+                        published_date = as_dhaka(published_at).date() if published_at else None
+                        if published_date != datetime.now(TZ_DHAKA).date():
+                            print(f"Skipping {href}: published {published_at or 'unknown'} - not today's news.")
+                            continue
+
+                        # AI Extraction
+                        data = parse_story_with_ai(title, article_text)
+
+                        # Image Generation (single card)
+                        cards = render_image_cards(data, browser)
+
+                        # Archive every card to storage, regardless of the social-posting cap below
+                        public_urls = archive_cards_to_storage(cards)
+
+                        # DB: claim this URL as processed BEFORE posting. Posting first
+                        # and saving after leaves a window where a crash/cancel loses the
+                        # insert but not the post, so the next hourly run would post the
+                        # same story again. Saving first makes double-posting impossible -
+                        # worst case a run cancelled mid-sleep leaves a story recorded
+                        # but unposted (it won't be retried), which is preferable.
+                        conn = get_db()
+                        cur = conn.cursor()
+                        cur.execute("""
+                            INSERT INTO news_items (url, source, title, location, context, accused_victim, issues, cron_log_id)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING
+                        """, (href, channel['name'], title, data.get('location'), data.get('context'), data.get('accused_victim'), data.get('issues'), log_id))
+                        claimed = cur.rowcount > 0
+                        conn.commit()
+                        cur.close()
+                        conn.close()
+
+                        if not claimed:
+                            # Another run got there first (e.g. queued run that started
+                            # before this one finished) - it owns this story, don't post it.
+                            print(f"Skipping posting {href}: already claimed by the db.")
+                            continue
+
+                        # Social Publishing (capped per run, see MAX_SOCIAL_POSTS_PER_RUN).
+                        # Posts after the first are spaced 0.5-1.5 min apart so new
+                        # news reaches the page gradually through the hour.
+                        if social_posts_made < MAX_SOCIAL_POSTS_PER_RUN:
+                            if social_posts_made > 0:
+                                delay = random.randint(*SOCIAL_POST_INTERVAL_RANGE)
+                                print(f"Waiting {delay}s before next post (0.5-1.5 min spacing)...")
+                                time.sleep(delay)
+                            publish_to_socials(cards, public_urls, data)
+                            social_posts_made += 1
+
+                        provider_counts[channel['name']] += 1
+                    except Exception as e:
+                        print(f"Error processing {href}: {e}")
+                        errors.append(f"{channel['name']} - {href}: {e}")
+            except Exception as e:
+                print(f"Error checking {channel['name']}: {e}")
+                errors.append(f"{channel['name']}: {e}")
+        browser.close()
 
     # Storage keeps only today's cards - clean out anything uploaded on a
     # previous day. Best-effort so a storage hiccup can't fail the whole run;
